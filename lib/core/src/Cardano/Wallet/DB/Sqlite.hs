@@ -1,22 +1,48 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedLabels #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# OPTIONS_GHC -fno-warn-unused-top-binds #-}
 
-module Cardano.Wallet.DB.Sqlite where
+module Cardano.Wallet.DB.Sqlite
+    ( newDBLayer
+    ) where
 
 import Prelude
 
+import Cardano.Wallet.DB
+    ( DBLayer (..)
+    , ErrNoSuchWallet (..)
+    , ErrWalletAlreadyExists (..)
+    , PrimaryKey (..)
+    )
 import Cardano.Wallet.DB.SqliteTypes
-    ( AddressScheme, TxId )
+    ( AddressScheme (..), TxId (..) )
+import Control.Exception
+    ( try )
+import Control.Lens
+    ( to )
+import Control.Monad
+    ( void )
+import Data.Bifunctor
+    ( first, second )
+import qualified Data.ByteString.Char8 as B8
+import Data.Generics.Internal.VL.Lens
+    ( (^.) )
 import Data.Text
     ( Text )
+import qualified Data.Text as T
 import Data.Time.Clock
     ( UTCTime )
 import Data.Word
@@ -30,8 +56,34 @@ import Database.Persist.TH
     , sqlSettings
     )
 import GHC.Generics
-    ( Generic (..) )
+    ( Generic )
+import System.IO
+    ( stderr )
+import System.Log.FastLogger
+    ( fromLogStr )
 
+import Conduit
+    ( MonadUnliftIO, ResourceT, runResourceT )
+import Control.Monad.Logger
+    ( LoggingT, runNoLoggingT, runStderrLoggingT )
+import Control.Monad.Reader
+    ( ReaderT )
+import Database.Persist.Sqlite
+    -- ( SqlBackend, runMigration, runSqlConn, withSqliteConn )
+import Control.Monad.Trans.Except
+    ( ExceptT (..), runExceptT )
+import Database.Persist.Sql
+    ( LogFunc )
+import Database.Persist.Sqlite
+    ( createSqlPool, wrapConnection )
+
+import qualified Data.Set as Set
+import qualified Database.Sqlite as Sqlite
+
+import Cardano.Wallet.Primitive.Types
+    ( WalletMetadata (..) )
+
+import qualified Cardano.Wallet.Primitive.Model as W
 import qualified Cardano.Wallet.Primitive.Types as W
 
 share
@@ -148,4 +200,216 @@ UTxO                                  sql=utxo
 
     Foreign Checkpoint fk_checkpoint_utxo utxoTableWalletId utxoTableWalletSlot
     deriving Show Generic
+
+-- The pending transactions for a wallet checkpoint.
+PendingTx
+
+    -- The wallet checkpoint (wallet_id, slot_id)
+    pendingTxTableWalletId    W.WalletId  sql=wallet_id
+    pendingTxTableSlotId      W.SlotId    sql=slot_id
+
+    -- Transaction TxIn and TxOut
+    pendingTxTableId2         TxId        sql=tx_id
+
+    Primary pendingTxTableWalletId pendingTxTableSlotId pendingTxTableId2
+    Foreign Checkpoint fk_pending_tx pendingTxTableWalletId pendingTxTableSlotId
+
 |]
+
+----------------------------------------------------------------------------
+-- Sqlite connection set up
+
+enableForeignKeys :: Sqlite.Connection -> IO ()
+enableForeignKeys conn = Sqlite.prepare conn "PRAGMA foreign_keys = ON;" >>= void . Sqlite.step
+
+createSqliteBackend :: Maybe FilePath -> LogFunc -> IO SqlBackend
+createSqliteBackend fp logFunc = do
+  conn <- Sqlite.open (sqliteConnStr fp)
+  enableForeignKeys conn
+  wrapConnection conn logFunc
+
+sqliteConnStr :: Maybe FilePath -> Text
+sqliteConnStr = maybe ":memory:" T.pack
+
+logStderr :: LogFunc
+logStderr _ _ _ str = B8.hPutStrLn stderr (fromLogStr str)
+
+-- | Run a query without error handling. There will be exceptions thrown.
+unsafeRunQuery
+    :: SqlBackend
+    -> SqlPersistM a
+    -> IO a
+unsafeRunQuery conn = runResourceT . runNoLoggingT . flip runSqlConn conn
+
+runQuery
+    :: SqlBackend
+    -> SqlPersistM a
+    -> ExceptT Sqlite.SqliteException IO a
+runQuery conn = ExceptT . try . runResourceT . runNoLoggingT . flip runSqlConn conn
+
+
+----------------------------------------------------------------------------
+-- Database layer methods
+
+-- | Sets up a connection to the SQLite database.
+--
+-- Database migrations are run to create tables if necessary.
+--
+-- If the given file path does not exist, it will be created by the sqlite
+-- library.
+newDBLayer
+    :: forall s t. Maybe FilePath
+       -- ^ Database file location, or Nothing for in-memory database
+    -> IO (DBLayer IO s t)
+newDBLayer fp = do
+    conn <- createSqliteBackend fp logStderr
+    unsafeRunQuery conn $ runMigration migrateAll
+    return $ DBLayer
+
+        {-----------------------------------------------------------------------
+                                      Wallets
+        -----------------------------------------------------------------------}
+
+        { createWallet = \(PrimaryKey wid) _cp meta -> ExceptT $ unsafeRunQuery conn $
+                Right <$> insert_ (mkWalletEntity wid meta)
+                -- fixme: insert a checkpoint
+        , removeWallet = \(PrimaryKey wid) -> ExceptT $ unsafeRunQuery conn $ do
+                n <- deleteWhereCount [WalTableId ==. wid]
+                pure $ if n == 0
+                       then Left (ErrNoSuchWallet wid)
+                       else Right ()
+        , listWallets = unsafeRunQuery conn $
+            map (PrimaryKey . unWalletKey) <$> selectKeysList [] []
+
+        {-----------------------------------------------------------------------
+                                    Checkpoints
+        -----------------------------------------------------------------------}
+
+        , putCheckpoint = \(PrimaryKey wid) cp ->
+            let (cps, pendings, ins, outs) = mkCheckpointEntity wid cp
+            in ExceptT $ unsafeRunQuery conn $ do
+                insert_ cps
+                insertMany_ ins
+                insertMany_ outs
+                insertMany_ pendings
+                pure $ Right ()
+
+        , readCheckpoint = \_key -> error "readCheckpoint to be implemented"
+
+        {-----------------------------------------------------------------------
+                                   Wallet Metadata
+        -----------------------------------------------------------------------}
+
+        , putWalletMeta = \(PrimaryKey wid) meta ->
+            ExceptT $ unsafeRunQuery conn $
+            selectFirst [WalTableId ==. wid] [] >>= \case
+                Just _ -> do
+                    updateWhere [WalTableId ==. wid]
+                        (mkWalletMetadataUpdate meta)
+                    pure $ Right ()
+                Nothing -> pure $ Left $ ErrNoSuchWallet wid
+
+        , readWalletMeta = \(PrimaryKey wid) -> unsafeRunQuery conn $
+               fmap (metadataFromEntity . entityVal) <$> selectFirst [WalTableId ==. wid] []
+
+        {-----------------------------------------------------------------------
+                                     Tx History
+        -----------------------------------------------------------------------}
+
+        , putTxHistory = \(PrimaryKey _wid) _txs' ->
+                error "putTxHistory to be implemented"
+
+        , readTxHistory = \_key ->
+                error "readTxHistory to be implemented"
+
+        {-----------------------------------------------------------------------
+                                       Keystore
+        -----------------------------------------------------------------------}
+
+        , putPrivateKey = \(PrimaryKey _wid) _k ->
+                error "putPrivateKey to be implemented"
+
+        , readPrivateKey = \_key ->
+                error "readPrivateKey to be implemented"
+
+        {-----------------------------------------------------------------------
+                                       Lock
+        -----------------------------------------------------------------------}
+
+        , withLock = \_action -> error "withLock to be implemented"
+
+        }
+
+----------------------------------------------------------------------------
+-- Conversion between Persistent table types and wallet types
+
+delegationToText :: W.WalletDelegation W.PoolId -> Maybe Text
+delegationToText W.NotDelegating = Nothing
+delegationToText (W.Delegating pool) = Just (W.getPoolId pool)
+
+delegationFromText :: Maybe Text -> W.WalletDelegation W.PoolId
+delegationFromText Nothing = W.NotDelegating
+delegationFromText (Just pool) = W.Delegating (W.PoolId pool)
+
+mkWalletEntity :: W.WalletId -> W.WalletMetadata -> Wallet
+mkWalletEntity wid meta = Wallet
+    { walTableId = wid
+    , walTableName = meta ^. #name . to W.getWalletName
+    , walTablePassphraseLastUpdatedAt = meta ^. #passphraseInfo . to W.lastUpdatedAt
+    , walTableStatus = meta ^. #status
+    , walTableDelegation = meta ^. #delegation . to delegationToText
+    , walTableAddressScheme = Sequential -- fixme: depends on wallet
+    }
+
+mkWalletMetadataUpdate :: W.WalletMetadata -> [Update Wallet]
+mkWalletMetadataUpdate meta =
+    [ WalTableName =. meta ^. #name . to W.getWalletName
+    , WalTablePassphraseLastUpdatedAt =. meta ^. #passphraseInfo . to W.lastUpdatedAt
+    , WalTableStatus =. meta ^. #status
+    , WalTableDelegation =. meta ^. #delegation . to delegationToText
+    ]
+
+metadataFromEntity :: Wallet -> W.WalletMetadata
+metadataFromEntity wal = W.WalletMetadata
+    { name = W.WalletName (walTableName wal)
+    , passphraseInfo = W.WalletPassphraseInfo (walTablePassphraseLastUpdatedAt wal)
+    , status = walTableStatus wal
+    , delegation = delegationFromText (walTableDelegation wal)
+    }
+
+mkCheckpointEntity
+    :: forall s t. W.TxId t
+    => W.WalletId
+    -> W.Wallet s t
+    -> (Checkpoint, [PendingTx], [TxIn], [TxOut])
+mkCheckpointEntity wid wal =
+    ( cp, map (pendingTx . fst) pending
+    , concatMap (dist pendingTxIn . fmap W.inputs) pending
+    , concatMap (dist pendingTxOut . fmap (zip [0..] . W.outputs)) pending )
+  where
+    dist :: (a -> b -> c) -> (a, [b]) -> [c]
+    dist f (a, bs) = [f a b | b <- bs]
+    pending = [(TxId (W.txId @t tx), tx) | tx <- Set.toList (W.getPending wal)]
+    sl = W.currentTip wal
+    cp = Checkpoint
+        { checkpointTableWalletId = wid
+        , checkpointTableWalletSlot = sl
+        }
+    pendingTx tid = PendingTx
+        { pendingTxTableWalletId = wid
+        , pendingTxTableSlotId = sl
+        , pendingTxTableId2 = tid
+        }
+    pendingTxIn tid txIn = TxIn
+        { txInputTableTxId = tid
+        , txInputTableWalletId = wid
+        , txInputTableSourceTxId = TxId (W.inputId txIn)
+        , txInputTableSourceIndex = W.inputIx txIn
+        }
+    pendingTxOut tid (ix, txOut) = TxOut
+        { txOutputTableTxId = tid
+        , txOutputTableWalletId = wid
+        , txOutputTableIndex = ix
+        , txOutputTableAddress = W.address txOut
+        , txOutputTableAmount = W.coin txOut
+        }

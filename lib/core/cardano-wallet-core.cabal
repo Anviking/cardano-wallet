@@ -46,6 +46,7 @@ library
     , generic-lens
     , http-api-data
     , http-media
+    , lens
     , memory
     , path-pieces
     , persistent
@@ -58,6 +59,13 @@ library
     , time
     , transformers
     , vector
+
+    , persistent
+    , persistent-sqlite
+    , conduit
+    , monad-logger
+    , mtl
+    , fast-logger
 
   hs-source-dirs:
       src

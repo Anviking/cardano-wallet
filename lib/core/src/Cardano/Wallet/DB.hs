@@ -25,7 +25,7 @@ import Cardano.Wallet.Primitive.AddressDerivation
 import Cardano.Wallet.Primitive.Model
     ( Wallet )
 import Cardano.Wallet.Primitive.Types
-    ( Hash, Tx, TxMeta, WalletId, WalletMetadata )
+    ( Hash, Tx, TxId, TxMeta, WalletId, WalletMetadata )
 import Control.Monad.Trans.Except
     ( ExceptT )
 import Data.Map.Strict
@@ -56,7 +56,8 @@ data DBLayer m s t = DBLayer
         -- ^ Get the list of all known wallets in the DB, possibly empty.
 
     , putCheckpoint
-        :: PrimaryKey WalletId
+        :: TxId t
+        => PrimaryKey WalletId
         -> Wallet s t
         -> ExceptT ErrNoSuchWallet m ()
         -- ^ Replace the current checkpoint for a given wallet. We do not handle
