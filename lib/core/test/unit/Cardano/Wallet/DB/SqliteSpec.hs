@@ -1,6 +1,9 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE StandaloneDeriving #-}
+
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module Cardano.Wallet.DB.SqliteSpec
     ( spec
@@ -9,34 +12,42 @@ module Cardano.Wallet.DB.SqliteSpec
 import Prelude
 
 import Cardano.Wallet.DB.Sqlite
-    ( migrateAll )
-import Conduit
-    ( MonadUnliftIO, ResourceT, runResourceT )
-import Control.Monad.Logger
-    ( LoggingT, runStderrLoggingT )
-import Control.Monad.Reader
-    ( ReaderT )
-import Data.Text
-    ( Text )
-import Database.Persist.Sqlite
-    ( SqlBackend, runMigration, runSqlConn, withSqliteConn )
+    ( newDBLayer )
+import Crypto.Hash
+    ( hash )
+import Data.ByteString
+    ( ByteString )
+import Data.Time.Clock
+    ( getCurrentTime )
 import Test.Hspec
     ( Spec, describe, it, shouldReturn )
 
-runSqlite'
-    :: (MonadUnliftIO m)
-    => Text
-    -> ReaderT SqlBackend (LoggingT (ResourceT m)) a
-    -> m a
-runSqlite' connstr =
-    runResourceT . runStderrLoggingT . withSqliteConn connstr . runSqlConn
-
-testMigrate :: IO ()
-testMigrate = runSqlite' ":memory:" $ do
-    runMigration migrateAll
+import Cardano.Wallet
+    ( unsafeRunExceptT )
+import Cardano.Wallet.DB
+import Cardano.Wallet.Primitive.Types
+    ( WalletDelegation (..)
+    , WalletId (..)
+    , WalletMetadata (..)
+    , WalletName (..)
+    , WalletPassphraseInfo (..)
+    , WalletState (..)
+    )
 
 spec :: Spec
 spec = do
-    describe "Generated SQL schema" $ do
-        it "looks like SQL" $ do
-            testMigrate `shouldReturn` ()
+    describe "Wallet table" $ do
+        it "create and list works" $ do
+            db <- newDBLayer Nothing
+            now <- getCurrentTime
+            let wid = PrimaryKey (WalletId (hash ("test" :: ByteString)))
+                md = WalletMetadata
+                    { name = WalletName "test wallet"
+                    , passphraseInfo = WalletPassphraseInfo now
+                    , status = Ready
+                    , delegation = NotDelegating
+                    }
+            unsafeRunExceptT (createWallet db wid undefined md) `shouldReturn` ()
+            listWallets db `shouldReturn` [wid]
+
+deriving instance Show (PrimaryKey WalletId)
