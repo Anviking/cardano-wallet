@@ -61,6 +61,19 @@ import Web.PathPieces
 
 import qualified Data.Text as T
 
+import Cardano.Wallet.Primitive.Types
+    ( Address (..)
+    , Coin (..)
+    , Direction (..)
+    , Hash (..)
+    , SlotId (..)
+    , TxStatus (..)
+    , WalletId (..)
+    , WalletState (..)
+    , flatSlot
+    , fromFlatSlot
+    , isValidCoin
+    )
 ----------------------------------------------------------------------------
 -- Helper functions
 
@@ -250,3 +263,13 @@ instance PersistField Coin where
 
 instance PersistFieldSql Coin where
     sqlType _ = sqlType (Proxy @Word64)
+
+----------------------------------------------------------------------------
+-- Address
+
+instance PersistField Address where
+    toPersistValue = toPersistValue . toText
+    fromPersistValue = fromPersistValueFromText
+
+instance PersistFieldSql Address where
+    sqlType _ = sqlType (Proxy @Text)

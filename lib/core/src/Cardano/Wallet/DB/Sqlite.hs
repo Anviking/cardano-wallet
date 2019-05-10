@@ -34,8 +34,6 @@ import GHC.Generics
 
 import qualified Cardano.Wallet.Primitive.Types as W
 
--- fixme: need tables for wallet AddressPool
-
 share
     [ mkPersist sqlSettings { mpsPrefixFields = False }
     , mkMigrate "migrateAll"
@@ -105,7 +103,7 @@ TxOut
     txOutputTableTxId     TxId        sql=tx_id
     txOutputTableWalletId W.WalletId  sql=wallet_id
     txOutputTableIndex    Word32      sql=index
-    txOutputTableAddress  Text        sql=address
+    txOutputTableAddress  W.Address   sql=address
     txOutputTableAmount   W.Coin      sql=amount
 
     Primary txOutputTableTxId txOutputTableIndex
