@@ -21,22 +21,18 @@ module Cardano.Wallet.DB.Sqlite
 
 import Prelude
 
-import Cardano.Wallet.DB
-    ( DBLayer (..)
-    , ErrNoSuchWallet (..)
-    , ErrWalletAlreadyExists (..)
-    , PrimaryKey (..)
-    )
-import Cardano.Wallet.DB.SqliteTypes
-    ( AddressScheme (..), TxId (..) )
+import Conduit
+    ( runResourceT )
 import Control.Exception
     ( try )
 import Control.Lens
     ( to )
 import Control.Monad
     ( void )
-import Data.Bifunctor
-    ( first, second )
+import Control.Monad.Logger
+    ( runNoLoggingT )
+import Control.Monad.Trans.Except
+    ( ExceptT (..) )
 import qualified Data.ByteString.Char8 as B8
 import Data.Generics.Internal.VL.Lens
     ( (^.) )
@@ -47,10 +43,27 @@ import Data.Time.Clock
     ( UTCTime )
 import Data.Word
     ( Word32 )
+import Database.Persist.Sql
+    ( LogFunc
+    , Update (..)
+    , deleteWhereCount
+    , entityVal
+    , insertMany_
+    , insert_
+    , runMigration
+    , runSqlConn
+    , selectFirst
+    , selectKeysList
+    , updateWhere
+    , (=.)
+    , (==.)
+    )
+import Database.Persist.Sqlite
+    ( SqlBackend, SqlPersistM, wrapConnection )
 import Database.Persist.TH
-    ( mkMigrate
+    ( MkPersistSettings (..)
+    , mkMigrate
     , mkPersist
-    , mpsPrefixFields
     , persistLowerCase
     , share
     , sqlSettings
@@ -62,24 +75,13 @@ import System.IO
 import System.Log.FastLogger
     ( fromLogStr )
 
-import Conduit
-    ( MonadUnliftIO, ResourceT, runResourceT )
-import Control.Monad.Logger
-    ( LoggingT, runNoLoggingT, runStderrLoggingT )
-import Control.Monad.Reader
-    ( ReaderT )
-import Database.Persist.Sqlite
-    -- ( SqlBackend, runMigration, runSqlConn, withSqliteConn )
-import Control.Monad.Trans.Except
-    ( ExceptT (..), runExceptT )
-import Database.Persist.Sql
-    ( LogFunc )
-import Database.Persist.Sqlite
-    ( createSqlPool, wrapConnection )
-
 import qualified Data.Set as Set
 import qualified Database.Sqlite as Sqlite
 
+import Cardano.Wallet.DB
+    ( DBLayer (..), ErrNoSuchWallet (..), PrimaryKey (..) )
+import Cardano.Wallet.DB.SqliteTypes
+    ( AddressScheme (..), TxId (..) )
 import Cardano.Wallet.Primitive.Types
     ( WalletMetadata (..) )
 
