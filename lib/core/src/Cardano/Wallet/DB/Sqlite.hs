@@ -21,10 +21,14 @@ module Cardano.Wallet.DB.Sqlite
 
 import Prelude
 
+import Cardano.Crypto.Wallet
+    ( XPrv, unXPrv )
 import Cardano.Wallet.DB
     ( DBLayer (..), ErrNoSuchWallet (..), PrimaryKey (..) )
 import Cardano.Wallet.DB.SqliteTypes
     ( AddressScheme (..), TxId (..) )
+import Cardano.Wallet.Primitive.AddressDerivation
+    ( Depth (..), Key, getKey )
 import Cardano.Wallet.Primitive.Types
     ( WalletMetadata (..) )
 import Conduit
@@ -84,6 +88,7 @@ import qualified Cardano.Wallet.Primitive.Types as W
 import qualified Data.ByteString.Char8 as B8
 import qualified Data.Set as Set
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as T
 import qualified Database.Sqlite as Sqlite
 
 share
@@ -108,7 +113,8 @@ Wallet
 -- "SELECT * FROM wallet" won't print keys.
 PrivateKey                               sql=private_key
     privateKeyTableWalletId  W.WalletId  sql=wallet_id
-    privateKeyTableKey       Text        sql=private_key
+    privateKeyTableRootKey   Text        sql=root
+    privateKeyTableHash      Text        sql=hash
 
     Primary privateKeyTableWalletId
     Foreign Wallet fk_wallet_private_key privateKeyTableWalletId
@@ -326,12 +332,21 @@ newDBLayer fp = do
                                        Keystore
         -----------------------------------------------------------------------}
 
-        , putPrivateKey = \(PrimaryKey _wid) _k ->
-                error "putPrivateKey to be implemented"
+        , putPrivateKey = \(PrimaryKey wid) key ->
+                ExceptT $ unsafeRunQuery conn $
+                selectFirst [PrivateKeyTableWalletId ==. wid] [] >>= \case
+                    Just _ -> do
+                        updateWhere [PrivateKeyTableWalletId ==. wid]
+                            (mkPrivateKeyUpdate key)
+                        pure $ Right ()
+                    Nothing -> pure $ Left $ ErrNoSuchWallet wid
 
-        , readPrivateKey = \_key ->
+        , readPrivateKey = \(PrimaryKey _wid) ->
                 error "readPrivateKey to be implemented"
-
+{--
+                unsafeRunQuery conn $
+               fmap (privateKeyFromEntity . entityVal) <$> selectFirst [PrivateKeyTableWalletId ==. wid] []
+--}
         {-----------------------------------------------------------------------
                                        Lock
         -----------------------------------------------------------------------}
@@ -383,6 +398,23 @@ metadataFromEntity wal = W.WalletMetadata
     , delegation = delegationFromText (walTableDelegation wal)
     }
 
+mkPrivateKeyUpdate
+    :: (Key 'RootK XPrv, W.Hash "encryption")
+    -> [Update PrivateKey]
+mkPrivateKeyUpdate (root, hash) =
+    let rootBS = (T.decodeUtf8 . unXPrv . getKey) root
+        hashEncrypted = (T.decodeUtf8 . W.getHash) hash
+    in [ PrivateKeyTableRootKey =. rootBS
+       , PrivateKeyTableHash =. hashEncrypted
+       ]
+{--
+privateKeyFromEntity
+    :: PrivateKey
+    -> (Key 'RootK XPrv, W.Hash "encryption")
+privateKeyFromEntity pk =
+    ( (coerce . T.encodeUtf8 . privateKeyTableRootKey) pk
+    , (W.Hash . T.encodeUtf8 . privateKeyTableHash) pk )
+--}
 mkCheckpointEntity
     :: forall s t. W.TxId t
     => W.WalletId
