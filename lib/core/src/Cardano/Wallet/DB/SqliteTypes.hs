@@ -9,7 +9,8 @@ module Cardano.Wallet.DB.SqliteTypes where
 import Prelude
 
 import Cardano.Wallet.Primitive.Types
-    ( Coin (..)
+    ( Address (..)
+    , Coin (..)
     , Direction (..)
     , Hash (..)
     , SlotId (..)
@@ -61,19 +62,6 @@ import Web.PathPieces
 
 import qualified Data.Text as T
 
-import Cardano.Wallet.Primitive.Types
-    ( Address (..)
-    , Coin (..)
-    , Direction (..)
-    , Hash (..)
-    , SlotId (..)
-    , TxStatus (..)
-    , WalletId (..)
-    , WalletState (..)
-    , flatSlot
-    , fromFlatSlot
-    , isValidCoin
-    )
 ----------------------------------------------------------------------------
 -- Helper functions
 

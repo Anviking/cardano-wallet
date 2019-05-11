@@ -11,20 +11,12 @@ module Cardano.Wallet.DB.SqliteSpec
 
 import Prelude
 
-import Cardano.Wallet.DB.Sqlite
-    ( newDBLayer )
-import Crypto.Hash
-    ( hash )
-import Data.ByteString
-    ( ByteString )
-import Data.Time.Clock
-    ( getCurrentTime )
-import Test.Hspec
-    ( Spec, describe, it, shouldReturn )
-
 import Cardano.Wallet
     ( unsafeRunExceptT )
 import Cardano.Wallet.DB
+    ( DBLayer (..), PrimaryKey (..) )
+import Cardano.Wallet.DB.Sqlite
+    ( newDBLayer )
 import Cardano.Wallet.Primitive.Types
     ( WalletDelegation (..)
     , WalletId (..)
@@ -33,6 +25,14 @@ import Cardano.Wallet.Primitive.Types
     , WalletPassphraseInfo (..)
     , WalletState (..)
     )
+import Crypto.Hash
+    ( hash )
+import Data.ByteString
+    ( ByteString )
+import Data.Time.Clock
+    ( getCurrentTime )
+import Test.Hspec
+    ( Spec, describe, it, shouldReturn )
 
 spec :: Spec
 spec = do
@@ -43,7 +43,7 @@ spec = do
             let wid = PrimaryKey (WalletId (hash ("test" :: ByteString)))
                 md = WalletMetadata
                     { name = WalletName "test wallet"
-                    , passphraseInfo = WalletPassphraseInfo now
+                    , passphraseInfo = Just $ WalletPassphraseInfo now
                     , status = Ready
                     , delegation = NotDelegating
                     }
@@ -56,7 +56,7 @@ spec = do
             let wid = PrimaryKey (WalletId (hash ("test" :: ByteString)))
                 md = WalletMetadata
                     { name = WalletName "test wallet"
-                    , passphraseInfo = WalletPassphraseInfo now
+                    , passphraseInfo = Just $ WalletPassphraseInfo now
                     , status = Ready
                     , delegation = NotDelegating
                     }
