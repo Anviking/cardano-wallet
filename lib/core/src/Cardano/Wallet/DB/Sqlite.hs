@@ -23,13 +23,13 @@ module Cardano.Wallet.DB.Sqlite
 import Prelude
 
 import Cardano.Crypto.Wallet
-    ( XPrv, unXPrv )
+    ( XPrv, unXPrv, xprv )
 import Cardano.Wallet.DB
     ( DBLayer (..), ErrNoSuchWallet (..), PrimaryKey (..) )
 import Cardano.Wallet.DB.SqliteTypes
     ( AddressScheme (..), TxId (..) )
 import Cardano.Wallet.Primitive.AddressDerivation
-    ( Depth (..), Key, getKey )
+    ( Depth (..), Key (Key), getKey )
 import Cardano.Wallet.Primitive.AddressDiscovery
     ( IsOurs (..) )
 import Cardano.Wallet.Primitive.Types
@@ -43,7 +43,7 @@ import Control.Exception
 import Control.Lens
     ( to )
 import Control.Monad
-    ( void )
+    ( void, (<=<) )
 import Control.Monad.IO.Class
     ( MonadIO (..) )
 import Control.Monad.Logger
@@ -54,6 +54,8 @@ import Control.Monad.Trans.Reader
     ( ReaderT (..) )
 import Data.Bifunctor
     ( bimap )
+import Data.ByteArray.Encoding
+    ( Base (..), convertFromBase, convertToBase )
 import Data.Generics.Internal.VL.Lens
     ( (^.) )
 import Data.List
@@ -374,20 +376,19 @@ newDBLayer fp = do
         -----------------------------------------------------------------------}
 
         , putPrivateKey = \(PrimaryKey wid) key ->
-                ExceptT $ unsafeRunQuery conn $
-                selectFirst [PrivateKeyTableWalletId ==. wid] [] >>= \case
-                    Just _ -> do
-                        updateWhere [PrivateKeyTableWalletId ==. wid]
-                            (mkPrivateKeyUpdate key)
-                        pure $ Right ()
-                    Nothing -> pure $ Left $ ErrNoSuchWallet wid
+            ExceptT $ unsafeRunQuery conn $
+            selectWallet wid >>= \case
+                Just _ -> Right <$> do
+                    deleteWhere [PrivateKeyTableWalletId ==. wid]
+                    insert_ (mkPrivateKeyEntity wid key)
+                Nothing -> pure $ Left $ ErrNoSuchWallet wid
 
-        , readPrivateKey = \(PrimaryKey _wid) ->
-                error "readPrivateKey to be implemented"
-{--
-                unsafeRunQuery conn $
-               fmap (privateKeyFromEntity . entityVal) <$> selectFirst [PrivateKeyTableWalletId ==. wid] []
---}
+        , readPrivateKey = \(PrimaryKey wid) ->
+            unsafeRunQuery conn $ let
+                keys = selectFirst [PrivateKeyTableWalletId ==. wid] []
+                toMaybe = either (const Nothing) Just
+            in (>>= toMaybe . privateKeyFromEntity . entityVal) <$> keys
+
         {-----------------------------------------------------------------------
                                        Lock
         -----------------------------------------------------------------------}
@@ -448,14 +449,29 @@ mkPrivateKeyUpdate (root, hash) =
     in [ PrivateKeyTableRootKey =. rootBS
        , PrivateKeyTableHash =. hashEncrypted
        ]
-{--
+
+mkPrivateKeyEntity
+    :: W.WalletId
+    -> (Key 'RootK XPrv, W.Hash "encryption")
+    -> PrivateKey
+mkPrivateKeyEntity wid (root, hash) = PrivateKey
+    { privateKeyTableWalletId = wid
+    , privateKeyTableRootKey = hexText . unXPrv . getKey $ root
+    , privateKeyTableHash = hexText . W.getHash $ hash
+    }
+  where
+    hexText = T.decodeUtf8 . convertToBase Base16
+
 privateKeyFromEntity
     :: PrivateKey
-    -> (Key 'RootK XPrv, W.Hash "encryption")
-privateKeyFromEntity pk =
-    ( (coerce . T.encodeUtf8 . privateKeyTableRootKey) pk
-    , (W.Hash . T.encodeUtf8 . privateKeyTableHash) pk )
---}
+    -> Either String (Key 'RootK XPrv, W.Hash "encryption")
+privateKeyFromEntity (PrivateKey _ k h) = (,)
+    <$> fmap Key (xprvFromText k)
+    <*> fmap W.Hash (fromHexText h)
+  where
+    fromHexText :: Text -> Either String B8.ByteString
+    fromHexText = convertFromBase Base16 . T.encodeUtf8
+    xprvFromText = xprv <=< fromHexText
 
 mkCheckpointEntity
     :: forall s t. W.TxId t

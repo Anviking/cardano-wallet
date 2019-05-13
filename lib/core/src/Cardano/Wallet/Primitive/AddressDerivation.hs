@@ -28,6 +28,7 @@ module Cardano.Wallet.Primitive.AddressDerivation
     -- * Polymorphic / General Purpose Types
     -- $use
       Key
+        (Key) -- fixme: no constructor export
     , getKey
     , Depth (..)
     , Index
