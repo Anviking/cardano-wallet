@@ -278,7 +278,8 @@ runQuery conn = ExceptT . try . runResourceT . runNoLoggingT . flip runSqlConn c
 -- If the given file path does not exist, it will be created by the sqlite
 -- library.
 newDBLayer
-    :: forall s t. Maybe FilePath
+    :: forall s t. (IsOurs s, NFData s, Show s, W.TxId t)
+    => Maybe FilePath
        -- ^ Database file location, or Nothing for in-memory database
     -> IO (DBLayer IO s t)
 newDBLayer fp = do
@@ -290,10 +291,10 @@ newDBLayer fp = do
                                       Wallets
         -----------------------------------------------------------------------}
 
-        { createWallet = \(PrimaryKey wid) _cp meta ->
-            ExceptT $ unsafeRunQuery conn $
-            Right <$> insert_ (mkWalletEntity wid meta)
-            -- fixme: insert a checkpoint
+        { createWallet = \(PrimaryKey wid) cp meta ->
+            ExceptT $ unsafeRunQuery conn $ Right <$> do
+                insert_ (mkWalletEntity wid meta)
+                insertCheckpoint wid cp
 
         , removeWallet = \(PrimaryKey wid) ->
             ExceptT $ unsafeRunQuery conn $ do
@@ -309,14 +310,8 @@ newDBLayer fp = do
         -----------------------------------------------------------------------}
 
         , putCheckpoint = \(PrimaryKey wid) cp ->
-            let (cp', utxo, pendings, ins, outs) = mkCheckpointEntity wid cp
-            in ExceptT $ unsafeRunQuery conn $ do
-                insert_ cp'
-                insertMany_ ins
-                insertMany_ outs
-                insertMany_ pendings
-                insertMany_ utxo
-                pure $ Right ()
+            ExceptT $ unsafeRunQuery conn $
+                Right <$> insertCheckpoint wid cp
 
         , readCheckpoint = \(PrimaryKey wid) ->
             unsafeRunQuery conn $
@@ -349,6 +344,8 @@ newDBLayer fp = do
         -----------------------------------------------------------------------}
 
         , putTxHistory = \(PrimaryKey _wid) _txs' ->
+            ExceptT $ unsafeRunQuery conn $
+
                 error "putTxHistory to be implemented"
 
         , readTxHistory = \_key ->
@@ -509,6 +506,19 @@ checkpointFromEntity (Checkpoint _ tip) utxo ins outs =
         ordered = map snd . sortOn fst
         -- fixme: implement state
         s = undefined
+
+insertCheckpoint
+    :: (MonadIO m, W.TxId t)
+    => W.WalletId
+    -> W.Wallet s t
+    -> ReaderT SqlBackend m ()
+insertCheckpoint wid cp = do
+    let (cp', utxo, pendings, ins, outs) = mkCheckpointEntity wid cp
+    insert_ cp'
+    insertMany_ ins
+    insertMany_ outs
+    insertMany_ pendings
+    insertMany_ utxo
 
 selectLatestCheckpoint
     :: MonadIO m

@@ -39,7 +39,7 @@ import Data.Map.Strict
 -- | A Database interface for storing various things in a DB. In practice,
 -- we'll need some extra contraints on the wallet state that allows us to
 -- serialize and unserialize it (e.g. @forall s. (Serialize s) => ...@)
-data DBLayer m s t = DBLayer
+data (IsOurs s, NFData s, Show s, TxId t) => DBLayer m s t = DBLayer
     { createWallet
         :: PrimaryKey WalletId
         -> Wallet s t
@@ -60,8 +60,7 @@ data DBLayer m s t = DBLayer
         -- ^ Get the list of all known wallets in the DB, possibly empty.
 
     , putCheckpoint
-        :: TxId t
-        => PrimaryKey WalletId
+        :: PrimaryKey WalletId
         -> Wallet s t
         -> ExceptT ErrNoSuchWallet m ()
         -- ^ Replace the current checkpoint for a given wallet. We do not handle
@@ -71,8 +70,7 @@ data DBLayer m s t = DBLayer
         -- If the wallet doesn't exist, this operation returns an error.
 
     , readCheckpoint
-        :: (IsOurs s, NFData s, Show s, TxId t)
-        => PrimaryKey WalletId
+        :: PrimaryKey WalletId
         -> m (Maybe (Wallet s t))
         -- ^ Fetch the most recent checkpoint of a given wallet.
         --
