@@ -23,13 +23,13 @@ module Cardano.Wallet.DB.Sqlite
 import Prelude
 
 import Cardano.Crypto.Wallet
-    ( XPrv, unXPrv, xprv )
+    ( XPrv, unXPrv )
 import Cardano.Wallet.DB
     ( DBLayer (..), ErrNoSuchWallet (..), PrimaryKey (..) )
 import Cardano.Wallet.DB.SqliteTypes
     ( AddressScheme (..), TxId (..) )
 import Cardano.Wallet.Primitive.AddressDerivation
-    ( Depth (..), Key (Key), getKey )
+    ( Depth (..), Key, deserializeKey, getKey, serializeKey )
 import Cardano.Wallet.Primitive.AddressDiscovery
     ( IsOurs (..) )
 import Cardano.Wallet.Primitive.Types
@@ -43,7 +43,7 @@ import Control.Exception
 import Control.Lens
     ( to )
 import Control.Monad
-    ( void, (<=<) )
+    ( void )
 import Control.Monad.IO.Class
     ( MonadIO (..) )
 import Control.Monad.Logger
@@ -54,8 +54,6 @@ import Control.Monad.Trans.Reader
     ( ReaderT (..) )
 import Data.Bifunctor
     ( bimap )
-import Data.ByteArray.Encoding
-    ( Base (..), convertFromBase, convertToBase )
 import Data.Generics.Internal.VL.Lens
     ( (^.) )
 import Data.List
@@ -114,7 +112,6 @@ import qualified Data.ByteString.Char8 as B8
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Data.Text as T
-import qualified Data.Text.Encoding as T
 import qualified Database.Sqlite as Sqlite
 
 share
@@ -454,24 +451,18 @@ mkPrivateKeyEntity
     :: W.WalletId
     -> (Key 'RootK XPrv, W.Hash "encryption")
     -> PrivateKey
-mkPrivateKeyEntity wid (root, hash) = PrivateKey
+mkPrivateKeyEntity wid kh = PrivateKey
     { privateKeyTableWalletId = wid
-    , privateKeyTableRootKey = hexText . unXPrv . getKey $ root
-    , privateKeyTableHash = hexText . W.getHash $ hash
+    , privateKeyTableRootKey = root
+    , privateKeyTableHash = hash
     }
   where
-    hexText = convertToBase Base16
+    (root, hash) = serializeKey kh
 
 privateKeyFromEntity
     :: PrivateKey
     -> Either String (Key 'RootK XPrv, W.Hash "encryption")
-privateKeyFromEntity (PrivateKey _ k h) = (,)
-    <$> fmap Key (xprvFromText k)
-    <*> fmap W.Hash (fromHexText h)
-  where
-    fromHexText :: B8.ByteString -> Either String B8.ByteString
-    fromHexText = convertFromBase Base16
-    xprvFromText = xprv <=< fromHexText
+privateKeyFromEntity (PrivateKey _ k h) = deserializeKey (k, h)
 
 mkCheckpointEntity
     :: forall s t. W.TxId t
