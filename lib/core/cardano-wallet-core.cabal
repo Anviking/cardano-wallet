@@ -38,16 +38,19 @@ library
     , basement
     , bytestring
     , cardano-crypto
+    , conduit
     , containers
     , cryptonite
     , deepseq
     , exceptions
+    , fast-logger
     , fmt
     , generic-lens
     , http-api-data
     , http-media
     , lens
     , memory
+    , monad-logger
     , path-pieces
     , persistent
     , persistent-sqlite
@@ -59,13 +62,6 @@ library
     , time
     , transformers
     , vector
-
-    , persistent
-    , persistent-sqlite
-    , conduit
-    , monad-logger
-    , mtl
-    , fast-logger
 
   hs-source-dirs:
       src

@@ -1,5 +1,6 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE StandaloneDeriving #-}
 
@@ -17,14 +18,22 @@ import Cardano.Wallet.DB
     ( DBLayer (..), PrimaryKey (..) )
 import Cardano.Wallet.DB.Sqlite
     ( newDBLayer )
+import Cardano.Wallet.Primitive.AddressDiscovery
+    ( IsOurs (..) )
+import Cardano.Wallet.Primitive.Model
+    ( initWallet )
 import Cardano.Wallet.Primitive.Types
-    ( WalletDelegation (..)
+    ( Hash (..)
+    , TxId (..)
+    , WalletDelegation (..)
     , WalletId (..)
     , WalletMetadata (..)
     , WalletName (..)
     , WalletPassphraseInfo (..)
     , WalletState (..)
     )
+import Control.DeepSeq
+    ( NFData )
 import Crypto.Hash
     ( hash )
 import Data.ByteString
@@ -34,11 +43,13 @@ import Data.Time.Clock
 import Test.Hspec
     ( Spec, describe, it, shouldReturn )
 
+import qualified Data.ByteString.Char8 as B8
+
 spec :: Spec
 spec = do
     describe "Wallet table" $ do
         it "create and list works" $ do
-            db <- newDBLayer Nothing
+            db <- getDBLayer
             now <- getCurrentTime
             let wid = PrimaryKey (WalletId (hash ("test" :: ByteString)))
                 md = WalletMetadata
@@ -47,11 +58,12 @@ spec = do
                     , status = Ready
                     , delegation = NotDelegating
                     }
-            unsafeRunExceptT (createWallet db wid undefined md) `shouldReturn` ()
+                cp = initWallet (DummyState md)
+            unsafeRunExceptT (createWallet db wid cp md) `shouldReturn` ()
             listWallets db `shouldReturn` [wid]
 
         it "create and get meta works" $ do
-            db <- newDBLayer Nothing
+            db <- getDBLayer
             now <- getCurrentTime
             let wid = PrimaryKey (WalletId (hash ("test" :: ByteString)))
                 md = WalletMetadata
@@ -60,7 +72,25 @@ spec = do
                     , status = Ready
                     , delegation = NotDelegating
                     }
-            unsafeRunExceptT (createWallet db wid undefined md) `shouldReturn` ()
+                cp = initWallet (DummyState md)
+            unsafeRunExceptT (createWallet db wid cp md) `shouldReturn` ()
             readWalletMeta db wid `shouldReturn` Just md
+    where
+        getDBLayer
+            :: IO (DBLayer IO DummyState DummyTarget)
+        getDBLayer = do newDBLayer Nothing
 
 deriving instance Show (PrimaryKey WalletId)
+
+data DummyTarget
+
+instance TxId DummyTarget where
+    txId = Hash . B8.pack . show
+
+newtype DummyState = DummyState WalletMetadata
+    deriving (Show, Eq)
+
+deriving instance NFData DummyState
+
+instance IsOurs DummyState where
+    isOurs _ wm = (True, wm)

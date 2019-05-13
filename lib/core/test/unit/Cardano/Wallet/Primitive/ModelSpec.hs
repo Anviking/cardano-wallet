@@ -35,7 +35,6 @@ import Cardano.Wallet.Primitive.Types
     , SlotId (..)
     , Tx (..)
     , TxId (..)
-    , TxId (..)
     , TxIn (..)
     , TxMeta (direction)
     , TxOut (..)

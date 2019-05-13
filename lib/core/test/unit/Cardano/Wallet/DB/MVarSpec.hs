@@ -188,7 +188,7 @@ spec = do
   where
     -- | Wrap the result of 'readTxHistory' in an arbitrary identity Applicative
     readTxHistoryF
-        :: Monad m
+        :: (Monad m, IsOurs s, NFData s, Show s, TxId t)
         => DBLayer m s t
         -> PrimaryKey WalletId
         -> m (Identity (Map (Hash "Tx") (Tx, TxMeta)))

@@ -74,8 +74,8 @@ import Cardano.Crypto.Wallet
     , deriveXPub
     , generateNew
     , toXPub
-    , unXPub
     , unXPrv
+    , unXPub
     , xprv
     )
 import Cardano.Wallet.Primitive.Mnemonic
