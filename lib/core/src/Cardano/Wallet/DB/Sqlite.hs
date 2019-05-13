@@ -137,10 +137,10 @@ Wallet
 
 -- The private key for each wallet. This is in a separate table simply so that
 -- "SELECT * FROM wallet" won't print keys.
-PrivateKey                               sql=private_key
-    privateKeyTableWalletId  W.WalletId  sql=wallet_id
-    privateKeyTableRootKey   Text        sql=root
-    privateKeyTableHash      Text        sql=hash
+PrivateKey                                  sql=private_key
+    privateKeyTableWalletId  W.WalletId     sql=wallet_id
+    privateKeyTableRootKey   B8.ByteString  sql=root
+    privateKeyTableHash      B8.ByteString  sql=hash
 
     Primary privateKeyTableWalletId
     Foreign Wallet fk_wallet_private_key privateKeyTableWalletId
@@ -444,8 +444,8 @@ mkPrivateKeyUpdate
     :: (Key 'RootK XPrv, W.Hash "encryption")
     -> [Update PrivateKey]
 mkPrivateKeyUpdate (root, hash) =
-    let rootBS = (T.decodeUtf8 . unXPrv . getKey) root
-        hashEncrypted = (T.decodeUtf8 . W.getHash) hash
+    let rootBS = unXPrv . getKey $ root
+        hashEncrypted = W.getHash hash
     in [ PrivateKeyTableRootKey =. rootBS
        , PrivateKeyTableHash =. hashEncrypted
        ]
@@ -460,7 +460,7 @@ mkPrivateKeyEntity wid (root, hash) = PrivateKey
     , privateKeyTableHash = hexText . W.getHash $ hash
     }
   where
-    hexText = T.decodeUtf8 . convertToBase Base16
+    hexText = convertToBase Base16
 
 privateKeyFromEntity
     :: PrivateKey
@@ -469,8 +469,8 @@ privateKeyFromEntity (PrivateKey _ k h) = (,)
     <$> fmap Key (xprvFromText k)
     <*> fmap W.Hash (fromHexText h)
   where
-    fromHexText :: Text -> Either String B8.ByteString
-    fromHexText = convertFromBase Base16 . T.encodeUtf8
+    fromHexText :: B8.ByteString -> Either String B8.ByteString
+    fromHexText = convertFromBase Base16
     xprvFromText = xprv <=< fromHexText
 
 mkCheckpointEntity
