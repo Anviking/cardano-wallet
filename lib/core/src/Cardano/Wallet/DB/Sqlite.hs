@@ -53,6 +53,7 @@ import Data.Word
     ( Word32 )
 import Database.Persist.Sql
     ( LogFunc
+    , SelectOpt (..)
     , Update (..)
     , deleteWhereCount
     , entityVal
@@ -62,7 +63,9 @@ import Database.Persist.Sql
     , runSqlConn
     , selectFirst
     , selectKeysList
+    , selectList
     , updateWhere
+    , (<-.)
     , (=.)
     , (==.)
     )
@@ -132,7 +135,7 @@ TxMeta
     txMetaTableWalletId   W.WalletId   sql=wallet_id
     txMetaTableStatus     W.TxStatus   sql=status
     txMetaTableDirection  W.Direction  sql=direction
-    txMetaTableSlotId     W.SlotId     sql=slot_id
+    txMetaTableSlotId     W.SlotId     sql=slot
     txMetaTableAmount     W.Coin       sql=amount
 
     Primary txMetaTableTxId txMetaTableWalletId
@@ -168,13 +171,13 @@ TxOut
     Foreign TxMeta fk_tx_meta_tx_out txOutputTableTxId txOutputTableWalletId
     deriving Show Generic
 
--- A checkpoint for a given wallet is referred to by (wallet_id, slot_id).
+-- A checkpoint for a given wallet is referred to by (wallet_id, slot).
 -- Checkpoint data such as UTxO will refer to this table.
 Checkpoint
     checkpointTableWalletId    W.WalletId  sql=wallet_id
-    checkpointTableWalletSlot  W.SlotId    sql=slot_id
+    checkpointTableSlot        W.SlotId    sql=slot
 
-    Primary checkpointTableWalletId checkpointTableWalletSlot
+    Primary checkpointTableWalletId checkpointTableSlot
     Foreign Wallet fk_wallet_checkpoint checkpointTableWalletId
 
     deriving Show Generic
@@ -184,9 +187,9 @@ Checkpoint
 -- necessary information for the UTxO is in this table.
 UTxO                                  sql=utxo
 
-    -- The wallet checkpoint (wallet_id, slot_id)
+    -- The wallet checkpoint (wallet_id, slot)
     utxoTableWalletId     W.WalletId  sql=wallet_id
-    utxoTableWalletSlot   W.SlotId    sql=slot_id
+    utxoTableWalletSlot   W.SlotId    sql=slot
 
     -- TxIn
     utxoTableInputId      TxId        sql=input_tx_id
@@ -210,9 +213,9 @@ UTxO                                  sql=utxo
 -- The pending transactions for a wallet checkpoint.
 PendingTx
 
-    -- The wallet checkpoint (wallet_id, slot_id)
+    -- The wallet checkpoint (wallet_id, slot)
     pendingTxTableWalletId    W.WalletId  sql=wallet_id
-    pendingTxTableSlotId      W.SlotId    sql=slot_id
+    pendingTxTableSlotId      W.SlotId    sql=slot
 
     -- Transaction TxIn and TxOut
     pendingTxTableId2         TxId        sql=tx_id
@@ -276,10 +279,13 @@ newDBLayer fp = do
                                       Wallets
         -----------------------------------------------------------------------}
 
-        { createWallet = \(PrimaryKey wid) _cp meta -> ExceptT $ unsafeRunQuery conn $
-                Right <$> insert_ (mkWalletEntity wid meta)
-                -- fixme: insert a checkpoint
-        , removeWallet = \(PrimaryKey wid) -> ExceptT $ unsafeRunQuery conn $ do
+        { createWallet = \(PrimaryKey wid) _cp meta ->
+            ExceptT $ unsafeRunQuery conn $
+            Right <$> insert_ (mkWalletEntity wid meta)
+            -- fixme: insert a checkpoint
+
+        , removeWallet = \(PrimaryKey wid) ->
+            ExceptT $ unsafeRunQuery conn $ do
                 n <- deleteWhereCount [WalTableId ==. wid]
                 pure $ if n == 0
                        then Left (ErrNoSuchWallet wid)
@@ -292,15 +298,25 @@ newDBLayer fp = do
         -----------------------------------------------------------------------}
 
         , putCheckpoint = \(PrimaryKey wid) cp ->
-            let (cps, pendings, ins, outs) = mkCheckpointEntity wid cp
+            let (cp, pendings, ins, outs) = mkCheckpointEntity wid cp
             in ExceptT $ unsafeRunQuery conn $ do
-                insert_ cps
+                insert_ cp
                 insertMany_ ins
                 insertMany_ outs
                 insertMany_ pendings
                 pure $ Right ()
 
-        , readCheckpoint = \_key -> error "readCheckpoint to be implemented"
+        , readCheckpoint = \(PrimaryKey wid) ->
+            unsafeRunQuery conn $
+            selectLatestCheckpoint wid >>= \case
+                Just cp@(Checkpoint _ sl) -> do
+                    let pendingQ = [ PendingTxTableWalletId ==. wid
+                                   , PendingTxTableSlotId ==. sl ]
+                    pendings <- pendingTxTableId2 <$> selectList pendingQ []
+                    ins <- selectList [TxInputTableTxId <-. pendings] []
+                    outs <- selectList [TxOutputTableTxId <-. pendings] []
+                    pure $ Just $ checkpointFromEntity cp pendings ins outs
+                Nothing -> pure Nothing
 
         {-----------------------------------------------------------------------
                                    Wallet Metadata
@@ -431,7 +447,7 @@ mkCheckpointEntity wid wal =
     sl = W.currentTip wal
     cp = Checkpoint
         { checkpointTableWalletId = wid
-        , checkpointTableWalletSlot = sl
+        , checkpointTableSlot = sl
         }
     pendingTx tid = PendingTx
         { pendingTxTableWalletId = wid
@@ -451,3 +467,17 @@ mkCheckpointEntity wid wal =
         , txOutputTableAddress = W.address txOut
         , txOutputTableAmount = W.coin txOut
         }
+
+checkpointFromEntity
+    :: forall s t. W.TxId t
+    => Checkpoint
+    -> [PendingTx]
+    -> [TxIn]
+    -> [TxOut]
+    -> W.Wallet s t
+checkpointFromEntity cp pendings ins outs
+    = undefined
+
+selectLatestCheckpoint wid =
+    selectFirst [CheckpointTableWalletId ==. wid]
+    [LimitTo 1, Desc CheckpointTableSlot]
