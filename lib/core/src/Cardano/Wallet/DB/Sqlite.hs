@@ -1,5 +1,6 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
@@ -360,8 +361,8 @@ newDBLayer fp = do
                     pure $ Right ()
                 Nothing -> pure $ Left $ ErrNoSuchWallet wid
 
-        , readTxHistory = \_key ->
-                error "readTxHistory to be implemented"
+        , readTxHistory = \(PrimaryKey wid) -> unsafeRunQuery conn $
+            selectTxHistory wid
 
         {-----------------------------------------------------------------------
                                        Keystore
@@ -502,22 +503,22 @@ checkpointFromEntity
     -> W.Wallet s t
 checkpointFromEntity (Checkpoint _ tip) utxo ins outs =
     W.Wallet utxo' pending tip s
-    where
-        utxo' = W.UTxO . Map.fromList $
-            [ (W.TxIn input ix, W.TxOut addr coin)
-            | UTxO _ _ (TxId input) ix addr coin <- utxo ]
-        ins' = [(txid, W.TxIn src ix) | TxIn txid _ (TxId src) ix <- ins]
-        outs' = [ (txid, (ix, W.TxOut addr amt))
-                | TxOut txid _ ix addr amt <- outs ]
-        txids = Set.fromList $ map fst ins' ++ map fst outs'
-        pending = flip Set.map txids $ \txid -> W.Tx
-            { W.inputs = lookupTx txid ins'
-            , W.outputs = ordered . lookupTx txid $ outs'
-            }
-        lookupTx txid = map snd . filter ((== txid) . fst)
-        -- fixme: sorting not necessary if db query was ordered
-        ordered = map snd . sortOn fst
-        s = error "fixme: implement wallet state in sqlite"
+  where
+    utxo' = W.UTxO . Map.fromList $
+        [ (W.TxIn input ix, W.TxOut addr coin)
+        | UTxO _ _ (TxId input) ix addr coin <- utxo ]
+    ins' = [(txid, W.TxIn src ix) | TxIn txid _ (TxId src) ix <- ins]
+    outs' = [ (txid, (ix, W.TxOut addr amt))
+            | TxOut txid _ ix addr amt <- outs ]
+    txids = Set.fromList $ map fst ins' ++ map fst outs'
+    pending = flip Set.map txids $ \txid -> W.Tx
+        { W.inputs = lookupTx txid ins'
+        , W.outputs = ordered . lookupTx txid $ outs'
+        }
+    lookupTx txid = map snd . filter ((== txid) . fst)
+    -- fixme: sorting not necessary if db query was ordered
+    ordered = map snd . sortOn fst
+    s = error "fixme: implement wallet state in sqlite"
 
 mkTxHistory
     :: W.WalletId
@@ -555,6 +556,35 @@ mkTxMetaEntity wid txid meta = TxMeta
     , txMetaTableAmount = getAmount (meta ^. #amount)
     }
     where getAmount (Quantity n) = n
+
+-- note: TxOut records must already be sorted by index
+txHistoryFromEntity
+    :: [TxMeta]
+    -> [TxIn]
+    -> [TxOut]
+    -> Map.Map (W.Hash "Tx") (W.Tx, W.TxMeta)
+txHistoryFromEntity metas ins outs = Map.fromList
+    [ (getTxId (txMetaTableTxId m), (mkTx (txMetaTableTxId m), mkTxMeta m))
+    | m <- metas ]
+  where
+    mkTx txid = W.Tx
+        { W.inputs = map mkTxIn $ filter ((== txid) . txInputTableTxId) ins
+        , W.outputs = map mkTxOut $ filter ((== txid) . txOutputTableTxId) outs
+        }
+    mkTxIn tx = W.TxIn
+        { W.inputId = getTxId (txInputTableSourceTxId tx)
+        , W.inputIx = txInputTableSourceIndex tx
+        }
+    mkTxOut tx = W.TxOut
+        { W.address = txOutputTableAddress tx
+        , W.coin = txOutputTableAmount tx
+        }
+    mkTxMeta m = W.TxMeta
+        { W.status = txMetaTableStatus m
+        , W.direction = txMetaTableDirection m
+        , W.slotId = txMetaTableSlotId m
+        , W.amount = Quantity (txMetaTableAmount m)
+        }
 
 ----------------------------------------------------------------------------
 -- DB Queries
@@ -608,3 +638,16 @@ selectTxs txids = do
     outs <- fmap entityVal <$> selectList [TxOutputTableTxId <-. txids]
         [Asc TxOutputTableTxId, Asc TxOutputTableIndex]
     pure (ins, outs)
+
+selectTxHistory
+    :: MonadIO m
+    => W.WalletId
+    -> ReaderT SqlBackend m (Map.Map (W.Hash "Tx") (W.Tx, W.TxMeta))
+selectTxHistory wid = do
+    metas <- fmap entityVal <$> selectList [TxMetaTableWalletId ==. wid] []
+    let txids = map txMetaTableTxId metas
+    ins <- fmap entityVal <$> selectList [TxInputTableTxId <-. txids]
+        [Asc TxInputTableTxId, Asc TxInputTableSourceIndex]
+    outs <- fmap entityVal <$> selectList [TxOutputTableTxId <-. txids]
+        [Asc TxOutputTableTxId, Asc TxOutputTableIndex]
+    pure $ txHistoryFromEntity metas ins outs
