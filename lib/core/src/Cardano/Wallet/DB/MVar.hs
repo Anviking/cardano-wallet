@@ -24,11 +24,12 @@ import Cardano.Wallet.DB
     )
 import Cardano.Wallet.Primitive.AddressDerivation
     ( Depth (..), Key, XPrv )
-import Cardano.Wallet.Primitive.AddressDiscovery (IsOurs)
+import Cardano.Wallet.Primitive.AddressDiscovery
+    ( IsOurs )
 import Cardano.Wallet.Primitive.Model
     ( Wallet )
 import Cardano.Wallet.Primitive.Types
-    ( Hash, Tx, TxMeta, WalletId, WalletMetadata, TxId )
+    ( Hash, Tx, TxId, TxMeta, WalletId, WalletMetadata )
 import Control.Concurrent.MVar
     ( MVar, modifyMVar, newMVar, readMVar, withMVar )
 import Control.DeepSeq
