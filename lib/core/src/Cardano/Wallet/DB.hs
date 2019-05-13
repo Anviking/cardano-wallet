@@ -22,10 +22,14 @@ import Prelude
 
 import Cardano.Wallet.Primitive.AddressDerivation
     ( Depth (..), Key, XPrv )
+import Cardano.Wallet.Primitive.AddressDiscovery
+    ( IsOurs )
 import Cardano.Wallet.Primitive.Model
     ( Wallet )
 import Cardano.Wallet.Primitive.Types
     ( Hash, Tx, TxId, TxMeta, WalletId, WalletMetadata )
+import Control.DeepSeq
+    ( NFData )
 import Control.Monad.Trans.Except
     ( ExceptT )
 import Data.Map.Strict
@@ -67,7 +71,8 @@ data DBLayer m s t = DBLayer
         -- If the wallet doesn't exist, this operation returns an error.
 
     , readCheckpoint
-        :: PrimaryKey WalletId
+        :: (IsOurs s, NFData s, Show s, TxId t)
+        => PrimaryKey WalletId
         -> m (Maybe (Wallet s t))
         -- ^ Fetch the most recent checkpoint of a given wallet.
         --

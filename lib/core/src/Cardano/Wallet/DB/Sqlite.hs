@@ -29,22 +29,32 @@ import Cardano.Wallet.DB.SqliteTypes
     ( AddressScheme (..), TxId (..) )
 import Cardano.Wallet.Primitive.AddressDerivation
     ( Depth (..), Key, getKey )
+import Cardano.Wallet.Primitive.AddressDiscovery
+    ( IsOurs (..) )
 import Cardano.Wallet.Primitive.Types
     ( WalletMetadata (..) )
 import Conduit
     ( runResourceT )
+import Control.DeepSeq
+    ( NFData )
 import Control.Exception
     ( try )
 import Control.Lens
     ( to )
 import Control.Monad
     ( void )
+import Control.Monad.IO.Class
+    ( MonadIO (..) )
 import Control.Monad.Logger
     ( runNoLoggingT )
 import Control.Monad.Trans.Except
     ( ExceptT (..) )
+import Control.Monad.Trans.Reader
+    ( ReaderT (..) )
 import Data.Generics.Internal.VL.Lens
     ( (^.) )
+import Data.List
+    ( sortOn )
 import Data.Text
     ( Text )
 import Data.Time.Clock
@@ -89,6 +99,7 @@ import System.Log.FastLogger
 import qualified Cardano.Wallet.Primitive.Model as W
 import qualified Cardano.Wallet.Primitive.Types as W
 import qualified Data.ByteString.Char8 as B8
+import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
@@ -153,7 +164,7 @@ TxIn
     txInputTableSourceIndex  Word32      sql=source_index
 
     Primary txInputTableTxId txInputTableSourceTxId txInputTableSourceIndex
-    Foreign TxMeta fk_tx_meta_tx_in txInputTableTxId txInputTableWalletId
+    Foreign TxMeta fk_tx_meta_tx_in txInputTableTxId txInputTableWalletId -- fixme: remove
     deriving Show Generic
 
 -- A transaction output associated with TxMeta.
@@ -168,7 +179,7 @@ TxOut
     txOutputTableAmount   W.Coin      sql=amount
 
     Primary txOutputTableTxId txOutputTableIndex
-    Foreign TxMeta fk_tx_meta_tx_out txOutputTableTxId txOutputTableWalletId
+    Foreign TxMeta fk_tx_meta_tx_out txOutputTableTxId txOutputTableWalletId -- fixme: remove
     deriving Show Generic
 
 -- A checkpoint for a given wallet is referred to by (wallet_id, slot).
@@ -185,43 +196,43 @@ Checkpoint
 -- The UTxO for a given wallet checkpoint is a one-to-one mapping from TxIn ->
 -- TxOut. This table does not need to refer to the TxIn or TxOut tables. All
 -- necessary information for the UTxO is in this table.
-UTxO                                  sql=utxo
+UTxO                                     sql=utxo
 
     -- The wallet checkpoint (wallet_id, slot)
-    utxoTableWalletId     W.WalletId  sql=wallet_id
-    utxoTableWalletSlot   W.SlotId    sql=slot
+    utxoTableWalletId        W.WalletId  sql=wallet_id
+    utxoTableCheckpointSlot  W.SlotId    sql=slot
 
     -- TxIn
-    utxoTableInputId      TxId        sql=input_tx_id
-    utxoTableInputIndex   Word32      sql=input_index
+    utxoTableInputId         TxId        sql=input_tx_id
+    utxoTableInputIndex      Word32      sql=input_index
 
     -- TxOut
-    utxoTableOutputId     TxId        sql=output_tx_id
-    utxoTableOutputIndex  Word32      sql=output_index
+    utxoTableOutputAddress   W.Address   sql=output_address
+    utxoTableOutputCoin      W.Coin      sql=output_coin
 
     Primary
         utxoTableWalletId
-        utxoTableWalletSlot
+        utxoTableCheckpointSlot
         utxoTableInputId
         utxoTableInputIndex
-        utxoTableOutputId
-        utxoTableOutputIndex
+        utxoTableOutputAddress
+        utxoTableOutputCoin
 
-    Foreign Checkpoint fk_checkpoint_utxo utxoTableWalletId utxoTableWalletSlot
+    Foreign Checkpoint fk_checkpoint_utxo utxoTableWalletId utxoTableCheckpointSlot
     deriving Show Generic
 
 -- The pending transactions for a wallet checkpoint.
 PendingTx
 
     -- The wallet checkpoint (wallet_id, slot)
-    pendingTxTableWalletId    W.WalletId  sql=wallet_id
-    pendingTxTableSlotId      W.SlotId    sql=slot
+    pendingTxTableWalletId        W.WalletId  sql=wallet_id
+    pendingTxTableCheckpointSlot  W.SlotId    sql=slot
 
     -- Transaction TxIn and TxOut
-    pendingTxTableId2         TxId        sql=tx_id
+    pendingTxTableId2             TxId        sql=tx_id
 
-    Primary pendingTxTableWalletId pendingTxTableSlotId pendingTxTableId2
-    Foreign Checkpoint fk_pending_tx pendingTxTableWalletId pendingTxTableSlotId
+    Primary pendingTxTableWalletId pendingTxTableCheckpointSlot pendingTxTableId2
+    Foreign Checkpoint fk_pending_tx pendingTxTableWalletId pendingTxTableCheckpointSlot
 
 |]
 
@@ -298,24 +309,23 @@ newDBLayer fp = do
         -----------------------------------------------------------------------}
 
         , putCheckpoint = \(PrimaryKey wid) cp ->
-            let (cp, pendings, ins, outs) = mkCheckpointEntity wid cp
+            let (cp', utxo, pendings, ins, outs) = mkCheckpointEntity wid cp
             in ExceptT $ unsafeRunQuery conn $ do
-                insert_ cp
+                insert_ cp'
                 insertMany_ ins
                 insertMany_ outs
                 insertMany_ pendings
+                insertMany_ utxo
                 pure $ Right ()
 
         , readCheckpoint = \(PrimaryKey wid) ->
             unsafeRunQuery conn $
             selectLatestCheckpoint wid >>= \case
-                Just cp@(Checkpoint _ sl) -> do
-                    let pendingQ = [ PendingTxTableWalletId ==. wid
-                                   , PendingTxTableSlotId ==. sl ]
-                    pendings <- pendingTxTableId2 <$> selectList pendingQ []
-                    ins <- selectList [TxInputTableTxId <-. pendings] []
-                    outs <- selectList [TxOutputTableTxId <-. pendings] []
-                    pure $ Just $ checkpointFromEntity cp pendings ins outs
+                Just cp -> do
+                    utxo <- selectUTxO cp
+                    pendings <- selectPending cp
+                    (ins, outs) <- selectTxs pendings
+                    pure $ Just $ checkpointFromEntity cp utxo ins outs
                 Nothing -> pure Nothing
 
         {-----------------------------------------------------------------------
@@ -431,13 +441,14 @@ privateKeyFromEntity pk =
     ( (coerce . T.encodeUtf8 . privateKeyTableRootKey) pk
     , (W.Hash . T.encodeUtf8 . privateKeyTableHash) pk )
 --}
+
 mkCheckpointEntity
     :: forall s t. W.TxId t
     => W.WalletId
     -> W.Wallet s t
-    -> (Checkpoint, [PendingTx], [TxIn], [TxOut])
+    -> (Checkpoint, [UTxO], [PendingTx], [TxIn], [TxOut])
 mkCheckpointEntity wid wal =
-    ( cp, map (pendingTx . fst) pending
+    ( cp, utxo, map (pendingTx . fst) pending
     , concatMap (dist pendingTxIn . fmap W.inputs) pending
     , concatMap (dist pendingTxOut . fmap (zip [0..] . W.outputs)) pending )
   where
@@ -451,7 +462,7 @@ mkCheckpointEntity wid wal =
         }
     pendingTx tid = PendingTx
         { pendingTxTableWalletId = wid
-        , pendingTxTableSlotId = sl
+        , pendingTxTableCheckpointSlot = sl
         , pendingTxTableId2 = tid
         }
     pendingTxIn tid txIn = TxIn
@@ -467,17 +478,68 @@ mkCheckpointEntity wid wal =
         , txOutputTableAddress = W.address txOut
         , txOutputTableAmount = W.coin txOut
         }
+    utxo = [ UTxO wid sl (TxId input) ix addr coin
+           | (W.TxIn input ix, W.TxOut addr coin) <- utxoMap ]
+    utxoMap = Map.assocs (W.getUTxO (W.totalUTxO wal))
 
+-- inputs and outputs must be sorted by txid, then ix
 checkpointFromEntity
-    :: forall s t. W.TxId t
+    :: forall s t. (IsOurs s, NFData s, Show s, W.TxId t)
     => Checkpoint
-    -> [PendingTx]
+    -> [UTxO]
     -> [TxIn]
     -> [TxOut]
     -> W.Wallet s t
-checkpointFromEntity cp pendings ins outs
-    = undefined
+checkpointFromEntity (Checkpoint _ tip) utxo ins outs =
+    W.Wallet utxo' pending tip s
+    where
+        utxo' = W.UTxO . Map.fromList $
+            [ (W.TxIn input ix, W.TxOut addr coin)
+            | UTxO _ _ (TxId input) ix addr coin <- utxo ]
+        ins' = [(txid, W.TxIn src ix) | TxIn txid _ (TxId src) ix <- ins]
+        outs' = [ (txid, (ix, W.TxOut addr amt))
+                | TxOut txid _ ix addr amt <- outs ]
+        txids = Set.fromList $ map fst ins' ++ map fst outs'
+        pending = flip Set.map txids $ \txid -> W.Tx
+            { W.inputs = lookupTx txid ins'
+            , W.outputs = ordered . lookupTx txid $ outs'
+            }
+        lookupTx txid = map snd . filter ((== txid) . fst)
+        -- fixme: sorting not necessary if db query was ordered
+        ordered = map snd . sortOn fst
+        -- fixme: implement state
+        s = undefined
 
-selectLatestCheckpoint wid =
+selectLatestCheckpoint
+    :: MonadIO m
+    => W.WalletId
+    -> ReaderT SqlBackend m (Maybe Checkpoint)
+selectLatestCheckpoint wid = fmap entityVal <$>
     selectFirst [CheckpointTableWalletId ==. wid]
     [LimitTo 1, Desc CheckpointTableSlot]
+
+selectUTxO
+    :: MonadIO m
+    => Checkpoint
+    -> ReaderT SqlBackend m [UTxO]
+selectUTxO (Checkpoint wid sl) = fmap entityVal <$>
+    selectList [UtxoTableWalletId ==. wid, UtxoTableCheckpointSlot ==. sl] []
+
+selectPending
+    :: MonadIO m
+    => Checkpoint
+    -> ReaderT SqlBackend m [TxId]
+selectPending (Checkpoint wid sl) = fmap (pendingTxTableId2 . entityVal) <$>
+    selectList [ PendingTxTableWalletId ==. wid
+               , PendingTxTableCheckpointSlot ==. sl ] []
+
+selectTxs
+    :: MonadIO m
+    => [TxId]
+    -> ReaderT SqlBackend m ([TxIn], [TxOut])
+selectTxs txids = do
+    ins <- fmap entityVal <$> selectList [TxInputTableTxId <-. txids]
+        [Asc TxInputTableTxId, Asc TxInputTableSourceIndex]
+    outs <- fmap entityVal <$> selectList [TxOutputTableTxId <-. txids]
+        [Asc TxOutputTableTxId, Asc TxOutputTableIndex]
+    pure (ins, outs)
