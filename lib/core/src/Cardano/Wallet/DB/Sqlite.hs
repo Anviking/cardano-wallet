@@ -70,16 +70,19 @@ import Database.Persist.Sql
     ( LogFunc
     , SelectOpt (..)
     , Update (..)
+    , deleteWhere
     , deleteWhereCount
     , entityVal
     , insertMany_
     , insert_
+    , putMany
     , runMigration
     , runSqlConn
     , selectFirst
     , selectKeysList
     , selectList
     , updateWhere
+    , (/<-.)
     , (<-.)
     , (=.)
     , (==.)
@@ -317,8 +320,10 @@ newDBLayer fp = do
         -----------------------------------------------------------------------}
 
         , putCheckpoint = \(PrimaryKey wid) cp ->
-            ExceptT $ unsafeRunQuery conn $
-                Right <$> insertCheckpoint wid cp
+            ExceptT $ unsafeRunQuery conn $ Right <$> do
+                deleteCheckpoints wid -- clear out all checkpoints
+                deleteLooseTransactions wid -- clear transactions
+                insertCheckpoint wid cp -- add this checkpoint
 
         , readCheckpoint = \(PrimaryKey wid) ->
             unsafeRunQuery conn $
@@ -355,9 +360,9 @@ newDBLayer fp = do
             selectWallet wid >>= \case
                 Just _ -> do
                     let (metas, txins, txouts) = mkTxHistory wid txs
-                    insertMany_ metas
-                    insertMany_ txins
-                    insertMany_ txouts
+                    putMany metas
+                    putMany txins
+                    putMany txouts
                     pure $ Right ()
                 Nothing -> pure $ Left $ ErrNoSuchWallet wid
 
@@ -604,6 +609,34 @@ insertCheckpoint wid cp = do
     insertMany_ outs
     insertMany_ pendings
     insertMany_ utxo
+
+-- | Delete all checkpoints associated with a wallet.
+deleteCheckpoints
+    :: MonadIO m
+    => W.WalletId
+    -> ReaderT SqlBackend m ()
+deleteCheckpoints wid = do
+    deleteWhere [UtxoTableWalletId ==. wid]
+    deleteWhere [PendingTxTableWalletId ==. wid]
+    deleteWhere [CheckpointTableWalletId ==. wid]
+
+-- | Delete transactions that belong to a wallet and aren't referred to by
+-- either Pending or TxMeta.
+deleteLooseTransactions
+    :: MonadIO m
+    => W.WalletId
+    -> ReaderT SqlBackend m ()
+deleteLooseTransactions wid = do
+    pendingTxId <- fmap (pendingTxTableId2 . entityVal) <$>
+        selectList [PendingTxTableWalletId ==. wid] []
+    metaTxId <- fmap (txMetaTableTxId . entityVal) <$>
+        selectList [TxMetaTableWalletId ==. wid] []
+    deleteWhere [ TxInputTableWalletId ==. wid
+                , TxInputTableTxId /<-. pendingTxId
+                , TxInputTableTxId /<-. metaTxId ]
+    deleteWhere [ TxOutputTableWalletId ==. wid
+                , TxOutputTableTxId /<-. pendingTxId
+                , TxOutputTableTxId /<-. metaTxId ]
 
 selectLatestCheckpoint
     :: MonadIO m
