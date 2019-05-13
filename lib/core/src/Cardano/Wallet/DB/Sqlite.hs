@@ -51,10 +51,14 @@ import Control.Monad.Trans.Except
     ( ExceptT (..) )
 import Control.Monad.Trans.Reader
     ( ReaderT (..) )
+import Data.Bifunctor
+    ( bimap )
 import Data.Generics.Internal.VL.Lens
     ( (^.) )
 import Data.List
     ( sortOn )
+import Data.Quantity
+    ( Quantity (..) )
 import Data.Text
     ( Text )
 import Data.Time.Clock
@@ -91,6 +95,8 @@ import Database.Persist.TH
     )
 import GHC.Generics
     ( Generic )
+import Numeric.Natural
+    ( Natural )
 import System.IO
     ( stderr )
 import System.Log.FastLogger
@@ -147,7 +153,7 @@ TxMeta
     txMetaTableStatus     W.TxStatus   sql=status
     txMetaTableDirection  W.Direction  sql=direction
     txMetaTableSlotId     W.SlotId     sql=slot
-    txMetaTableAmount     W.Coin       sql=amount
+    txMetaTableAmount     Natural      sql=amount
 
     Primary txMetaTableTxId txMetaTableWalletId
     Foreign Wallet fk_wallet_tx_meta txMetaTableWalletId
@@ -343,10 +349,16 @@ newDBLayer fp = do
                                      Tx History
         -----------------------------------------------------------------------}
 
-        , putTxHistory = \(PrimaryKey _wid) _txs' ->
+        , putTxHistory = \(PrimaryKey wid) txs ->
             ExceptT $ unsafeRunQuery conn $
-
-                error "putTxHistory to be implemented"
+            selectWallet wid >>= \case
+                Just _ -> do
+                    let (metas, txins, txouts) = mkTxHistory wid txs
+                    insertMany_ metas
+                    insertMany_ txins
+                    insertMany_ txouts
+                    pure $ Right ()
+                Nothing -> pure $ Left $ ErrNoSuchWallet wid
 
         , readTxHistory = \_key ->
                 error "readTxHistory to be implemented"
@@ -449,8 +461,6 @@ mkCheckpointEntity wid wal =
     , concatMap (dist pendingTxIn . fmap W.inputs) pending
     , concatMap (dist pendingTxOut . fmap (zip [0..] . W.outputs)) pending )
   where
-    dist :: (a -> b -> c) -> (a, [b]) -> [c]
-    dist f (a, bs) = [f a b | b <- bs]
     pending = [(TxId (W.txId @t tx), tx) | tx <- Set.toList (W.getPending wal)]
     sl = W.currentTip wal
     cp = Checkpoint
@@ -479,6 +489,9 @@ mkCheckpointEntity wid wal =
            | (W.TxIn input ix, W.TxOut addr coin) <- utxoMap ]
     utxoMap = Map.assocs (W.getUTxO (W.totalUTxO wal))
 
+dist :: (a -> b -> c) -> (a, [b]) -> [c]
+dist f (a, bs) = [f a b | b <- bs]
+
 -- inputs and outputs must be sorted by txid, then ix
 checkpointFromEntity
     :: forall s t. (IsOurs s, NFData s, Show s, W.TxId t)
@@ -504,8 +517,50 @@ checkpointFromEntity (Checkpoint _ tip) utxo ins outs =
         lookupTx txid = map snd . filter ((== txid) . fst)
         -- fixme: sorting not necessary if db query was ordered
         ordered = map snd . sortOn fst
-        -- fixme: implement state
-        s = undefined
+        s = error "fixme: implement wallet state in sqlite"
+
+mkTxHistory
+    :: W.WalletId
+    -> Map.Map (W.Hash "Tx") (W.Tx, W.TxMeta)
+    -> ([TxMeta], [TxIn], [TxOut])
+mkTxHistory wid txs =
+    ( map (uncurry (mkTxMetaEntity wid)) metas
+    , concatMap (dist mkTxIn . fmap W.inputs) hist
+    , concatMap (dist mkTxOut . fmap (zip [0..] . W.outputs)) hist )
+  where
+    pairs = Map.toList txs
+    metas = fmap snd <$> pairs
+    hist = bimap TxId fst <$> pairs
+    mkTxIn tid txIn = TxIn
+        { txInputTableTxId = tid
+        , txInputTableWalletId = wid
+        , txInputTableSourceTxId = TxId (W.inputId txIn)
+        , txInputTableSourceIndex = W.inputIx txIn
+        }
+    mkTxOut tid (ix, txOut) = TxOut
+        { txOutputTableTxId = tid
+        , txOutputTableWalletId = wid
+        , txOutputTableIndex = ix
+        , txOutputTableAddress = W.address txOut
+        , txOutputTableAmount = W.coin txOut
+        }
+
+mkTxMetaEntity :: W.WalletId -> W.Hash "Tx" -> W.TxMeta -> TxMeta
+mkTxMetaEntity wid txid meta = TxMeta
+    { txMetaTableTxId = TxId txid
+    , txMetaTableWalletId = wid
+    , txMetaTableStatus = meta ^. #status
+    , txMetaTableDirection = meta ^. #direction
+    , txMetaTableSlotId = meta ^. #slotId
+    , txMetaTableAmount = getAmount (meta ^. #amount)
+    }
+    where getAmount (Quantity n) = n
+
+----------------------------------------------------------------------------
+-- DB Queries
+
+selectWallet :: MonadIO m => W.WalletId -> ReaderT SqlBackend m (Maybe Wallet)
+selectWallet wid = fmap entityVal <$> selectFirst [WalTableId ==. wid] []
 
 insertCheckpoint
     :: (MonadIO m, W.TxId t)
