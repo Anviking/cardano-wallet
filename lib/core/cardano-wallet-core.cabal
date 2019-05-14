@@ -48,7 +48,6 @@ library
     , generic-lens
     , http-api-data
     , http-media
-    , lens
     , memory
     , monad-logger
     , path-pieces

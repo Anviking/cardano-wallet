@@ -40,8 +40,6 @@ import Control.DeepSeq
     ( NFData )
 import Control.Exception
     ( try )
-import Control.Lens
-    ( to )
 import Control.Monad
     ( void )
 import Control.Monad.IO.Class
@@ -54,6 +52,8 @@ import Control.Monad.Trans.Reader
     ( ReaderT (..) )
 import Data.Bifunctor
     ( bimap )
+import Data.Coerce
+    ( coerce )
 import Data.Generics.Internal.VL.Lens
     ( (^.) )
 import Data.List
@@ -408,23 +408,23 @@ delegationFromText (Just pool) = W.Delegating (W.PoolId pool)
 mkWalletEntity :: W.WalletId -> W.WalletMetadata -> Wallet
 mkWalletEntity wid meta = Wallet
     { walTableId = wid
-    , walTableName = meta ^. #name . to W.getWalletName
+    , walTableName = meta ^. #name . coerce
     , walTablePassphraseLastUpdatedAt = case meta ^. #passphraseInfo of
             Nothing -> Nothing
             Just (W.WalletPassphraseInfo passInfo) -> Just passInfo
     , walTableStatus = meta ^. #status
-    , walTableDelegation = meta ^. #delegation . to delegationToText
+    , walTableDelegation = delegationToText $ meta ^. #delegation
     , walTableAddressScheme = Sequential -- fixme: depends on wallet
     }
 
 mkWalletMetadataUpdate :: W.WalletMetadata -> [Update Wallet]
 mkWalletMetadataUpdate meta =
-    [ WalTableName =. meta ^. #name . to W.getWalletName
+    [ WalTableName =. meta ^. #name . coerce
     , WalTablePassphraseLastUpdatedAt =. case meta ^. #passphraseInfo of
             Nothing -> Nothing
             Just (W.WalletPassphraseInfo passInfo) -> Just passInfo
     , WalTableStatus =. meta ^. #status
-    , WalTableDelegation =. meta ^. #delegation . to delegationToText
+    , WalTableDelegation =. delegationToText (meta ^. #delegation)
     ]
 
 metadataFromEntity :: Wallet -> W.WalletMetadata
