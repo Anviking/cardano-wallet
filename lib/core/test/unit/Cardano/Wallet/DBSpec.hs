@@ -4,6 +4,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeApplications #-}
 
@@ -11,19 +12,21 @@
 
 module Cardano.Wallet.DBSpec
     ( spec
-    , KeyValPairs (..)
     , DummyTarget
     , DummyStateMVar (..)
     , DummyStateSqlite (..)
-    , once
-    , once_
     , lrp
     , unions
+    , readTxHistoryF
     , prop_createListWallet
+    , prop_readAfterDelete
     , prop_createWalletTwice
     , prop_removeWalletTwice
     , prop_readAfterPut
     , prop_putBeforeInit
+    , prop_sequentialPut
+    , prop_isolation
+    , prop_parallelPut
     ) where
 
 import Prelude
@@ -64,10 +67,12 @@ import Cardano.Wallet.Primitive.Types
     , WalletPassphraseInfo (..)
     , WalletState (..)
     )
+import Control.Concurrent.Async
+    ( forConcurrently_ )
 import Control.DeepSeq
     ( NFData )
 import Control.Monad
-    ( forM, void )
+    ( forM, forM_, void )
 import Control.Monad.IO.Class
     ( liftIO )
 import Control.Monad.Trans.Except
@@ -76,6 +81,8 @@ import Crypto.Hash
     ( hash )
 import Data.Functor.Identity
     ( Identity (..) )
+import Data.Map.Strict
+    ( Map )
 import Data.Quantity
     ( Quantity (..) )
 import Data.Word
@@ -93,6 +100,7 @@ import Test.QuickCheck
     , Property
     , arbitraryBoundedEnum
     , choose
+    , cover
     , elements
     , generate
     , genericShrink
@@ -108,6 +116,7 @@ import Test.QuickCheck.Monadic
 import qualified Data.ByteArray as BA
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as B8
+import qualified Data.List as L
 import qualified Data.Map.Strict as Map
 
 spec :: Spec
@@ -300,6 +309,14 @@ rootKeys :: [Key 'RootK XPrv]
 rootKeys = unsafePerformIO $ generate (vectorOf 10 genRootKeys)
 {-# NOINLINE rootKeys #-}
 
+-- | Wrap the result of 'readTxHistory' in an arbitrary identity Applicative
+readTxHistoryF
+    :: (Monad m, IsOurs s, NFData s, Show s, TxId t)
+    => DBLayer m s t
+    -> PrimaryKey WalletId
+    -> m (Identity (Map (Hash "Tx") (Tx, TxMeta)))
+readTxHistoryF db = fmap Identity . readTxHistory db
+
 
 {-------------------------------------------------------------------------------
                                     Properties
@@ -358,7 +375,8 @@ prop_removeWalletTwice dbLayer (key@(PrimaryKey wid), cp, meta) =
 
 -- | Checks that a given resource can be read after having been inserted in DB.
 prop_readAfterPut
-    :: (Show (f a), Eq (f a), Applicative f, Show s, Eq s, IsOurs s, NFData s, Arbitrary (Wallet s DummyTarget))
+    :: ( Show (f a), Eq (f a), Applicative f
+       , Show s, Eq s, IsOurs s, NFData s, Arbitrary (Wallet s DummyTarget))
     => (  DBLayer IO s DummyTarget
        -> PrimaryKey WalletId
        -> a
@@ -412,3 +430,157 @@ prop_putBeforeInit putOp readOp empty dbLayer (key@(PrimaryKey wid), a) =
             Left err ->
                 err `shouldBe` ErrNoSuchWallet wid
         readOp db key `shouldReturn` empty
+
+-- | Modifying one resource leaves the other untouched
+prop_isolation
+    :: ( Applicative f, Show (f b), Eq (f b)
+       , Applicative g, Show (g c), Eq (g c)
+       , Applicative h, Show (h d), Eq (h d)
+       , Show s, Eq s, IsOurs s, NFData s
+       , Arbitrary (Wallet s DummyTarget)
+       )
+    => (  DBLayer IO s DummyTarget
+       -> PrimaryKey WalletId
+       -> a
+       -> ExceptT ErrNoSuchWallet IO ()
+       ) -- ^ Put Operation
+    -> (  DBLayer IO s DummyTarget
+       -> PrimaryKey WalletId
+       -> IO (f b)
+       ) -- ^ Read Operation for another resource
+    -> (  DBLayer IO s DummyTarget
+       -> PrimaryKey WalletId
+       -> IO (g c)
+       ) -- ^ Read Operation for another resource
+    -> (  DBLayer IO s DummyTarget
+       -> PrimaryKey WalletId
+       -> IO (h d)
+       ) -- ^ Read Operation for another resource
+    -> DBLayer IO s DummyTarget
+    -> (PrimaryKey WalletId, a)
+        -- ^ Properties arguments
+    -> Property
+prop_isolation putA readB readC readD dbLayer (key, a) =
+    monadicIO (setup >>= prop)
+  where
+    setup = do
+        (cp, meta, txs) <- pick arbitrary
+        liftIO $ unsafeRunExceptT $ createWallet dbLayer key cp meta
+        liftIO $ unsafeRunExceptT $ putTxHistory dbLayer key txs
+        (b, c, d) <- liftIO $ (,,)
+            <$> readB dbLayer key
+            <*> readC dbLayer key
+            <*> readD dbLayer key
+        return (dbLayer, (b, c, d))
+
+    prop (db, (b, c, d)) = liftIO $ do
+        unsafeRunExceptT $ putA db key a
+        readB db key `shouldReturn` b
+        readC db key `shouldReturn` c
+        readD db key `shouldReturn` d
+
+-- | Can't read back data after delete
+prop_readAfterDelete
+    :: ( Show (f a), Eq (f a), Applicative f
+       , Show s, Eq s, IsOurs s, NFData s
+       , Arbitrary (Wallet s DummyTarget)
+       )
+    => (  DBLayer IO s DummyTarget
+       -> PrimaryKey WalletId
+       -> IO (f a)
+       ) -- ^ Read Operation
+    -> f a
+        -- ^ An 'empty' value for the 'Applicative' f
+    -> DBLayer IO s DummyTarget
+    -> PrimaryKey WalletId
+    -> Property
+prop_readAfterDelete readOp empty dbLayer key =
+    monadicIO (setup >>= prop)
+  where
+    setup = do
+        (cp, meta) <- pick arbitrary
+        liftIO $ unsafeRunExceptT $ createWallet dbLayer key cp meta
+        return dbLayer
+    prop db = liftIO $ do
+        unsafeRunExceptT $ removeWallet db key
+        readOp db key `shouldReturn` empty
+
+
+-- | Check that the DB supports multiple sequential puts for a given resource
+prop_sequentialPut
+    :: ( Show (f a), Eq (f a), Applicative f
+       , Show s, Eq s, IsOurs s, NFData s
+       , Arbitrary (Wallet s DummyTarget)
+       )
+    => (  DBLayer IO s DummyTarget
+       -> PrimaryKey WalletId
+       -> a
+       -> ExceptT ErrNoSuchWallet IO ()
+       ) -- ^ Put Operation
+    -> (  DBLayer IO s DummyTarget
+       -> PrimaryKey WalletId
+       -> IO (f a)
+       ) -- ^ Read Operation
+    -> (forall k. Ord k => [(k, a)] -> [f a])
+        -- ^ How do we expect operations to resolve
+    -> DBLayer IO s DummyTarget
+    -> KeyValPairs (PrimaryKey WalletId) a
+        -- ^ Property arguments
+    -> Property
+prop_sequentialPut putOp readOp resolve dbLayer (KeyValPairs pairs) =
+    cover 90 cond "conflicting db entries" $ monadicIO (setup >>= prop)
+  where
+    -- Make sure that we have some conflicting insertion to actually test the
+    -- semantic of the DB Layer.
+    cond = L.length (L.nub ids) /= L.length ids
+      where
+        ids = map fst pairs
+    setup = do
+        (cp, meta) <- pick arbitrary
+        liftIO $ unsafeRunExceptT $ once_ pairs $ \(k, _) ->
+            createWallet dbLayer k cp meta
+        return dbLayer
+    prop db = liftIO $ do
+        unsafeRunExceptT $ forM_ pairs $ uncurry (putOp db)
+        res <- once pairs (readOp db . fst)
+        res `shouldBe` resolve pairs
+
+
+-- | Check that the DB supports multiple sequential puts for a given resource
+prop_parallelPut
+    :: ( Show (f a), Eq (f a), Applicative f
+       , Show s, Eq s, IsOurs s, NFData s
+       , Arbitrary (Wallet s DummyTarget)
+       )
+    => (  DBLayer IO s DummyTarget
+       -> PrimaryKey WalletId
+       -> a
+       -> ExceptT ErrNoSuchWallet IO ()
+       ) -- ^ Put Operation
+    -> (  DBLayer IO s DummyTarget
+       -> PrimaryKey WalletId
+       -> IO (f a)
+       ) -- ^ Read Operation
+    -> (forall k. Ord k => [(k, a)] -> Int)
+        -- ^ How many entries to we expect in the end
+    -> DBLayer IO s DummyTarget
+    -> KeyValPairs (PrimaryKey WalletId) a
+        -- ^ Property arguments
+    -> Property
+prop_parallelPut putOp readOp resolve dbLayer (KeyValPairs pairs) =
+    cover 90 cond "conflicting db entries" $ monadicIO (setup >>= prop)
+  where
+    -- Make sure that we have some conflicting insertion to actually test the
+    -- semantic of the DB Layer.
+    cond = L.length (L.nub ids) /= L.length ids
+      where
+        ids = map fst pairs
+    setup = do
+        (cp, meta) <- pick arbitrary
+        liftIO $ unsafeRunExceptT $ once_ pairs $ \(k, _) ->
+            createWallet dbLayer k cp meta
+        return dbLayer
+    prop db = liftIO $ do
+        forConcurrently_ pairs $ unsafeRunExceptT . uncurry (putOp db)
+        res <- once pairs (readOp db . fst)
+        length res `shouldBe` resolve pairs

@@ -11,52 +11,34 @@ module Cardano.Wallet.DB.SqliteSpec
 
 import Prelude
 
-import Cardano.Wallet
-    ( unsafeRunExceptT )
 import Cardano.Wallet.DB
-    ( DBLayer (..), ErrNoSuchWallet (..), PrimaryKey (..) )
+    ( DBLayer (..) )
 import Cardano.Wallet.DB.Sqlite
     ( newDBLayer )
 import Cardano.Wallet.DBSpec
     ( DummyStateSqlite (..)
     , DummyTarget
-    , KeyValPairs (..)
     , lrp
-    , once
-    , once_
     , prop_createListWallet
     , prop_createWalletTwice
+    , prop_isolation
+    , prop_parallelPut
     , prop_putBeforeInit
+    , prop_readAfterDelete
     , prop_readAfterPut
     , prop_removeWalletTwice
+    , prop_sequentialPut
+    , readTxHistoryF
     , unions
     )
-import Cardano.Wallet.Primitive.AddressDiscovery
-    ( IsOurs (..) )
 import Cardano.Wallet.Primitive.Types
-    ( Hash (..), Tx (..), TxId (..), TxMeta (..), WalletId (..) )
-import Control.Concurrent.Async
-    ( forConcurrently_ )
-import Control.DeepSeq
-    ( NFData )
-import Control.Monad
-    ( forM_ )
-import Control.Monad.IO.Class
-    ( liftIO )
-import Control.Monad.Trans.Except
-    ( ExceptT )
-import Data.Functor.Identity
-    ( Identity (..) )
+    ( Hash (..), Tx (..), TxMeta (..) )
 import Data.Map.Strict
     ( Map )
 import Test.Hspec
-    ( Spec, before, describe, it, shouldBe, shouldReturn, xit )
+    ( Spec, before, describe, it, xit )
 import Test.QuickCheck
-    ( Arbitrary (..), Property, checkCoverage, cover, property )
-import Test.QuickCheck.Monadic
-    ( monadicIO, pick )
-
-import qualified Data.List as L
+    ( checkCoverage, property )
 
 spec :: Spec
 spec = do
@@ -91,209 +73,60 @@ spec = do
         it "Private Key"
             (property . (prop_putBeforeInit putPrivateKey readPrivateKey Nothing))
 
-    describe "put doesn't affect other resources" $ do
+    before (newDBLayer Nothing :: IO (DBLayer IO DummyStateSqlite DummyTarget)) $
+        describe "put doesn't affect other resources" $ do
         xit "Checkpoint vs Wallet Metadata & Tx History & Private Key"
-            (property $ prop_isolation putCheckpoint
+            (property . (prop_isolation putCheckpoint
                 readWalletMeta
                 readTxHistoryF
-                readPrivateKey
+                readPrivateKey)
             )
         xit "Wallet Metadata vs Tx History & Checkpoint & Private Key"
-            (property $ prop_isolation putWalletMeta
+            (property . (prop_isolation putWalletMeta
                 readTxHistoryF
                 readCheckpoint
-                readPrivateKey
+                readPrivateKey)
             )
         xit "Tx History vs Checkpoint & Wallet Metadata & Private Key"
-            (property $ prop_isolation putTxHistory
+            (property . (prop_isolation putTxHistory
                 readCheckpoint
                 readWalletMeta
-                readPrivateKey
+                readPrivateKey)
             )
-    describe "can't read after delete" $ do
+
+    before (newDBLayer Nothing :: IO (DBLayer IO DummyStateSqlite DummyTarget)) $
+        describe "can't read after delete" $ do
         xit "Checkpoint"
-            (property $ prop_readAfterDelete readCheckpoint Nothing)
+            (property . (prop_readAfterDelete readCheckpoint Nothing))
         it "Wallet Metadata"
-            (property $ prop_readAfterDelete readWalletMeta Nothing)
+            (property . (prop_readAfterDelete readWalletMeta Nothing))
         it "Tx History"
-            (property $ prop_readAfterDelete readTxHistoryF (pure mempty))
+            (property . (prop_readAfterDelete readTxHistoryF (pure mempty)))
         it "Private Key"
-            (property $ prop_readAfterDelete readPrivateKey Nothing)
+            (property . (prop_readAfterDelete readPrivateKey Nothing))
 
-    describe "sequential puts replace values in order" $ do
+    before (newDBLayer Nothing :: IO (DBLayer IO DummyStateSqlite DummyTarget)) $
+        describe "sequential puts replace values in order" $ do
         xit "Checkpoint"
-            (checkCoverage $ prop_sequentialPut putCheckpoint readCheckpoint lrp)
+            (checkCoverage . (prop_sequentialPut putCheckpoint readCheckpoint lrp))
         xit "Wallet Metadata"
-            (checkCoverage $ prop_sequentialPut putWalletMeta readWalletMeta lrp)
+            (checkCoverage . (prop_sequentialPut putWalletMeta readWalletMeta lrp))
         xit "Tx History"
-            (checkCoverage $ prop_sequentialPut putTxHistory readTxHistoryF unions)
+            (checkCoverage . (prop_sequentialPut putTxHistory readTxHistoryF unions))
         it "Private Key"
-            (checkCoverage $ prop_sequentialPut putPrivateKey readPrivateKey lrp)
+            (checkCoverage . (prop_sequentialPut putPrivateKey readPrivateKey lrp))
 
-    describe "parallel puts replace values in _any_ order" $ do
+    before (newDBLayer Nothing :: IO (DBLayer IO DummyStateSqlite DummyTarget)) $
+        describe "parallel puts replace values in _any_ order" $ do
         xit "Checkpoint"
-            (checkCoverage $ prop_parallelPut putCheckpoint readCheckpoint
-                (length . lrp @Maybe))
+            (checkCoverage . (prop_parallelPut putCheckpoint readCheckpoint
+                (length . lrp @Maybe)))
         xit "Wallet Metadata"
-            (checkCoverage $ prop_parallelPut putWalletMeta readWalletMeta
-                (length . lrp @Maybe))
+            (checkCoverage . (prop_parallelPut putWalletMeta readWalletMeta
+                (length . lrp @Maybe)))
         xit "Tx History"
-            (checkCoverage $ prop_parallelPut putTxHistory readTxHistoryF
-                (length . unions @(Map (Hash "Tx") (Tx, TxMeta))))
+            (checkCoverage . (prop_parallelPut putTxHistory readTxHistoryF
+                (length . unions @(Map (Hash "Tx") (Tx, TxMeta)))))
         xit "Private Key"
-            (checkCoverage $ prop_parallelPut putPrivateKey readPrivateKey
-                (length . lrp @Maybe))
-
-    where
-    -- | Wrap the result of 'readTxHistory' in an arbitrary identity Applicative
-    readTxHistoryF
-        :: (Monad m, IsOurs s, NFData s, Show s, TxId t)
-        => DBLayer m s t
-        -> PrimaryKey WalletId
-        -> m (Identity (Map (Hash "Tx") (Tx, TxMeta)))
-    readTxHistoryF db = fmap Identity . readTxHistory db
-
-
----- FROM THIS CODE CAN PROBABLY BE SHARED WITH MVARSPEC and put to DBSpec
-
-
--- | Modifying one resource leaves the other untouched
-prop_isolation
-    :: ( Applicative f, Show (f b), Eq (f b)
-       , Applicative g, Show (g c), Eq (g c)
-       , Applicative h, Show (h d), Eq (h d)
-       )
-    => (  DBLayer IO DummyStateSqlite DummyTarget
-       -> PrimaryKey WalletId
-       -> a
-       -> ExceptT ErrNoSuchWallet IO ()
-       ) -- ^ Put Operation
-    -> (  DBLayer IO DummyStateSqlite DummyTarget
-       -> PrimaryKey WalletId
-       -> IO (f b)
-       ) -- ^ Read Operation for another resource
-    -> (  DBLayer IO DummyStateSqlite DummyTarget
-       -> PrimaryKey WalletId
-       -> IO (g c)
-       ) -- ^ Read Operation for another resource
-    -> (  DBLayer IO DummyStateSqlite DummyTarget
-       -> PrimaryKey WalletId
-       -> IO (h d)
-       ) -- ^ Read Operation for another resource
-    -> (PrimaryKey WalletId, a)
-        -- ^ Properties arguments
-    -> Property
-prop_isolation putA readB readC readD (key, a) =
-    monadicIO (setup >>= prop)
-  where
-    setup = do
-        db <- liftIO $ newDBLayer Nothing
-        (cp, meta, txs) <- pick arbitrary
-        liftIO $ unsafeRunExceptT $ createWallet db key cp meta
-        liftIO $ unsafeRunExceptT $ putTxHistory db key txs
-        (b, c, d) <- liftIO $ (,,)
-            <$> readB db key
-            <*> readC db key
-            <*> readD db key
-        return (db, (b, c, d))
-
-    prop (db, (b, c, d)) = liftIO $ do
-        unsafeRunExceptT $ putA db key a
-        readB db key `shouldReturn` b
-        readC db key `shouldReturn` c
-        readD db key `shouldReturn` d
-
--- | Can't read back data after delete
-prop_readAfterDelete
-    :: (Show (f a), Eq (f a), Applicative f)
-    => (  DBLayer IO DummyStateSqlite DummyTarget
-       -> PrimaryKey WalletId
-       -> IO (f a)
-       ) -- ^ Read Operation
-    -> f a
-        -- ^ An 'empty' value for the 'Applicative' f
-    -> PrimaryKey WalletId
-    -> Property
-prop_readAfterDelete readOp empty key =
-    monadicIO (setup >>= prop)
-  where
-    setup = do
-        db <- liftIO $ newDBLayer Nothing
-        (cp, meta) <- pick arbitrary
-        liftIO $ unsafeRunExceptT $ createWallet db key cp meta
-        return db
-    prop db = liftIO $ do
-        unsafeRunExceptT $ removeWallet db key
-        readOp db key `shouldReturn` empty
-
--- | Check that the DB supports multiple sequential puts for a given resource
-prop_sequentialPut
-    :: (Show (f a), Eq (f a), Applicative f)
-    => (  DBLayer IO DummyStateSqlite DummyTarget
-       -> PrimaryKey WalletId
-       -> a
-       -> ExceptT ErrNoSuchWallet IO ()
-       ) -- ^ Put Operation
-    -> (  DBLayer IO DummyStateSqlite DummyTarget
-       -> PrimaryKey WalletId
-       -> IO (f a)
-       ) -- ^ Read Operation
-    -> (forall k. Ord k => [(k, a)] -> [f a])
-        -- ^ How do we expect operations to resolve
-    -> KeyValPairs (PrimaryKey WalletId) a
-        -- ^ Property arguments
-    -> Property
-prop_sequentialPut putOp readOp resolve (KeyValPairs pairs) =
-    cover 90 cond "conflicting db entries" $ monadicIO (setup >>= prop)
-  where
-    -- Make sure that we have some conflicting insertion to actually test the
-    -- semantic of the DB Layer.
-    cond = L.length (L.nub ids) /= L.length ids
-      where
-        ids = map fst pairs
-    setup = do
-        db <- liftIO $ newDBLayer Nothing
-        (cp, meta) <- pick arbitrary
-        liftIO $ unsafeRunExceptT $ once_ pairs $ \(k, _) ->
-            createWallet db k cp meta
-        return db
-    prop db = liftIO $ do
-        unsafeRunExceptT $ forM_ pairs $ uncurry (putOp db)
-        res <- once pairs (readOp db . fst)
-        res `shouldBe` resolve pairs
-
--- | Check that the DB supports multiple sequential puts for a given resource
-prop_parallelPut
-    :: (Show (f a), Eq (f a), Applicative f)
-    => (  DBLayer IO DummyStateSqlite DummyTarget
-       -> PrimaryKey WalletId
-       -> a
-       -> ExceptT ErrNoSuchWallet IO ()
-       ) -- ^ Put Operation
-    -> (  DBLayer IO DummyStateSqlite DummyTarget
-       -> PrimaryKey WalletId
-       -> IO (f a)
-       ) -- ^ Read Operation
-    -> (forall k. Ord k => [(k, a)] -> Int)
-        -- ^ How many entries to we expect in the end
-    -> KeyValPairs (PrimaryKey WalletId) a
-        -- ^ Property arguments
-    -> Property
-prop_parallelPut putOp readOp resolve (KeyValPairs pairs) =
-    cover 90 cond "conflicting db entries" $ monadicIO (setup >>= prop)
-  where
-    -- Make sure that we have some conflicting insertion to actually test the
-    -- semantic of the DB Layer.
-    cond = L.length (L.nub ids) /= L.length ids
-      where
-        ids = map fst pairs
-    setup = do
-        db <- liftIO $ newDBLayer Nothing
-        (cp, meta) <- pick arbitrary
-        liftIO $ unsafeRunExceptT $ once_ pairs $ \(k, _) ->
-            createWallet db k cp meta
-        return db
-    prop db = liftIO $ do
-        forConcurrently_ pairs $ unsafeRunExceptT . uncurry (putOp db)
-        res <- once pairs (readOp db . fst)
-        length res `shouldBe` resolve pairs
+            (checkCoverage . (prop_parallelPut putPrivateKey readPrivateKey
+                (length . lrp @Maybe)))
