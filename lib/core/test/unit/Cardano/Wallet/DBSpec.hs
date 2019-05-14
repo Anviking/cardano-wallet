@@ -9,20 +9,34 @@
 module Cardano.Wallet.DBSpec
     ( spec
     , KeyValPairs (..)
+    , DummyTarget
     , once
     , once_
     , lrp
     , unions
+    , prop_createListWallet
+    , prop_createWalletTwice
+    , prop_removeWalletTwice
     ) where
 
 import Prelude
 
 import Cardano.Crypto.Wallet
     ( unXPrv )
+import Cardano.Wallet
+    ( unsafeRunExceptT )
 import Cardano.Wallet.DB
-    ( PrimaryKey (..) )
+    ( DBLayer (..)
+    , ErrNoSuchWallet (..)
+    , ErrWalletAlreadyExists (..)
+    , PrimaryKey (..)
+    )
 import Cardano.Wallet.Primitive.AddressDerivation
     ( Depth (..), Key, Passphrase (..), XPrv, generateKeyFromSeed )
+import Cardano.Wallet.Primitive.AddressDiscovery
+    ( IsOurs (..) )
+import Cardano.Wallet.Primitive.Model
+    ( Wallet )
 import Cardano.Wallet.Primitive.Types
     ( Address (..)
     , Coin (..)
@@ -30,6 +44,7 @@ import Cardano.Wallet.Primitive.Types
     , Hash (..)
     , SlotId (..)
     , Tx (..)
+    , TxId (..)
     , TxIn (..)
     , TxMeta (..)
     , TxOut (..)
@@ -42,8 +57,14 @@ import Cardano.Wallet.Primitive.Types
     , WalletPassphraseInfo (..)
     , WalletState (..)
     )
+import Control.DeepSeq
+    ( NFData )
 import Control.Monad
     ( forM, void )
+import Control.Monad.IO.Class
+    ( liftIO )
+import Control.Monad.Trans.Except
+    ( runExceptT )
 import Crypto.Hash
     ( hash )
 import Data.Functor.Identity
@@ -57,11 +78,12 @@ import GHC.Generics
 import System.IO.Unsafe
     ( unsafePerformIO )
 import Test.Hspec
-    ( Spec )
+    ( Spec, shouldReturn )
 import Test.QuickCheck
     ( Arbitrary (..)
     , Gen
     , InfiniteList (..)
+    , Property
     , arbitraryBoundedEnum
     , choose
     , elements
@@ -73,6 +95,8 @@ import Test.QuickCheck
     )
 import Test.QuickCheck.Instances.Time
     ()
+import Test.QuickCheck.Monadic
+    ( monadicIO )
 
 import qualified Data.ByteArray as BA
 import qualified Data.ByteString as BS
@@ -113,6 +137,11 @@ instance (Arbitrary k, Arbitrary v) => Arbitrary (KeyValPairs k v) where
     arbitrary = do
         pairs <- choose (10, 50) >>= flip vectorOf arbitrary
         pure $ KeyValPairs pairs
+
+data DummyTarget
+
+instance TxId DummyTarget where
+    txId = Hash . B8.pack . show
 
 instance Arbitrary (PrimaryKey WalletId) where
     shrink _ = []
@@ -221,3 +250,59 @@ genRootKeys = do
 rootKeys :: [Key 'RootK XPrv]
 rootKeys = unsafePerformIO $ generate (vectorOf 10 genRootKeys)
 {-# NOINLINE rootKeys #-}
+
+
+{-------------------------------------------------------------------------------
+                                    Properties
+-------------------------------------------------------------------------------}
+
+-- | Can list created wallets
+prop_createListWallet
+    :: (Show s, Eq s, IsOurs s, NFData s)
+    => DBLayer IO s DummyTarget
+    -> KeyValPairs (PrimaryKey WalletId) (Wallet s DummyTarget, WalletMetadata)
+    -> Property
+prop_createListWallet dbLayer (KeyValPairs pairs) =
+    monadicIO (pure dbLayer >>= prop)
+  where
+    prop db = liftIO $ do
+        res <- once pairs $ \(k, (cp, meta)) ->
+            unsafeRunExceptT $ createWallet db k cp meta
+        (length <$> listWallets db) `shouldReturn` length res
+
+-- | Trying to create a same wallet twice should yield an error
+prop_createWalletTwice
+    :: (Show s, Eq s, IsOurs s, NFData s)
+    => DBLayer IO s DummyTarget
+    -> ( PrimaryKey WalletId
+       , Wallet s DummyTarget
+       , WalletMetadata
+       )
+    -> Property
+prop_createWalletTwice dbLayer (key@(PrimaryKey wid), cp, meta) =
+    monadicIO (pure dbLayer >>= prop)
+  where
+    prop db = liftIO $ do
+        let err = ErrWalletAlreadyExists wid
+        runExceptT (createWallet db key cp meta) `shouldReturn` Right ()
+        runExceptT (createWallet db key cp meta) `shouldReturn` Left err
+
+-- | Trying to remove a same wallet twice should yield an error
+prop_removeWalletTwice
+    :: (Show s, Eq s, IsOurs s, NFData s)
+    => DBLayer IO s DummyTarget
+    -> ( PrimaryKey WalletId
+       , Wallet s DummyTarget
+       , WalletMetadata
+       )
+    -> Property
+prop_removeWalletTwice dbLayer (key@(PrimaryKey wid), cp, meta) =
+    monadicIO (setup >>= prop)
+  where
+    setup = liftIO $ do
+        unsafeRunExceptT $ createWallet dbLayer key cp meta
+        return dbLayer
+    prop db = liftIO $ do
+        let err = ErrNoSuchWallet wid
+        runExceptT (removeWallet db key) `shouldReturn` Right ()
+        runExceptT (removeWallet db key) `shouldReturn` Left err

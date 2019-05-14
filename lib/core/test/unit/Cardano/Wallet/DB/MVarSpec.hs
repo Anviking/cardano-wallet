@@ -17,27 +17,26 @@ import Prelude
 import Cardano.Wallet
     ( unsafeRunExceptT )
 import Cardano.Wallet.DB
-    ( DBLayer (..)
-    , ErrNoSuchWallet (..)
-    , ErrWalletAlreadyExists (..)
-    , PrimaryKey (..)
-    )
+    ( DBLayer (..), ErrNoSuchWallet (..), PrimaryKey (..) )
 import Cardano.Wallet.DB.MVar
     ( newDBLayer )
 import Cardano.Wallet.DBSpec
-    ( KeyValPairs (..), lrp, once, once_, unions )
+    ( DummyTarget
+    , KeyValPairs (..)
+    , lrp
+    , once
+    , once_
+    , prop_createListWallet
+    , prop_createWalletTwice
+    , prop_removeWalletTwice
+    , unions
+    )
 import Cardano.Wallet.Primitive.AddressDiscovery
     ( IsOurs (..) )
 import Cardano.Wallet.Primitive.Model
     ( Wallet, initWallet )
 import Cardano.Wallet.Primitive.Types
-    ( Hash (..)
-    , Tx (..)
-    , TxId (..)
-    , TxMeta (..)
-    , WalletId (..)
-    , WalletMetadata (..)
-    )
+    ( Hash (..), Tx (..), TxId (..), TxMeta (..), WalletId (..) )
 import Control.Concurrent.Async
     ( forConcurrently_ )
 import Control.DeepSeq
@@ -53,7 +52,7 @@ import Data.Functor.Identity
 import Data.Map.Strict
     ( Map )
 import Test.Hspec
-    ( Spec, describe, it, shouldBe, shouldReturn )
+    ( Spec, before, describe, it, shouldBe, shouldReturn )
 import Test.QuickCheck
     ( Arbitrary (..), Property, checkCoverage, cover, property )
 import Test.QuickCheck.Instances
@@ -61,18 +60,18 @@ import Test.QuickCheck.Instances
 import Test.QuickCheck.Monadic
     ( monadicIO, pick )
 
-import qualified Data.ByteString.Char8 as B8
 import qualified Data.List as L
 
 spec :: Spec
 spec = do
-    describe "Extra Properties about DB initialization" $ do
+    before (newDBLayer :: IO (DBLayer IO DummyState DummyTarget)) $
+        describe "Extra Properties about DB initialization" $ do
         it "createWallet . listWallets yields expected results"
-            (property prop_createListWallet)
+            (property . prop_createListWallet)
         it "creating same wallet twice yields an error"
-            (property prop_createWalletTwice)
+            (property . prop_createWalletTwice)
         it "removing the same wallet twice yields an error"
-            (property prop_removeWalletTwice)
+            (property . prop_removeWalletTwice)
 
     describe "put . read yields a result" $ do
         it "Checkpoint"
@@ -358,62 +357,9 @@ prop_parallelPut putOp readOp resolve (KeyValPairs pairs) =
         res <- once pairs (readOp db . fst)
         length res `shouldBe` resolve pairs
 
--- | Can list created wallets
-prop_createListWallet
-    :: KeyValPairs (PrimaryKey WalletId) (Wallet DummyState DummyTarget, WalletMetadata)
-    -> Property
-prop_createListWallet (KeyValPairs pairs) =
-    monadicIO (setup >>= prop)
-  where
-    setup = liftIO newDBLayer
-    prop db = liftIO $ do
-        res <- once pairs $ \(k, (cp, meta)) ->
-            unsafeRunExceptT $ createWallet db k cp meta
-        (length <$> listWallets db) `shouldReturn` length res
-
--- | Trying to create a same wallet twice should yield an error
-prop_createWalletTwice
-    :: ( PrimaryKey WalletId
-       , Wallet DummyState DummyTarget
-       , WalletMetadata
-       )
-    -> Property
-prop_createWalletTwice (key@(PrimaryKey wid), cp, meta) =
-    monadicIO (setup >>= prop)
-  where
-    setup = liftIO newDBLayer
-    prop db = liftIO $ do
-        let err = ErrWalletAlreadyExists wid
-        runExceptT (createWallet db key cp meta) `shouldReturn` Right ()
-        runExceptT (createWallet db key cp meta) `shouldReturn` Left err
-
--- | Trying to remove a same wallet twice should yield an error
-prop_removeWalletTwice
-    :: ( PrimaryKey WalletId
-       , Wallet DummyState DummyTarget
-       , WalletMetadata
-       )
-    -> Property
-prop_removeWalletTwice (key@(PrimaryKey wid), cp, meta) =
-    monadicIO (setup >>= prop)
-  where
-    setup = liftIO $ do
-        db <- newDBLayer
-        unsafeRunExceptT $ createWallet db key cp meta
-        return db
-    prop db = liftIO $ do
-        let err = ErrNoSuchWallet wid
-        runExceptT (removeWallet db key) `shouldReturn` Right ()
-        runExceptT (removeWallet db key) `shouldReturn` Left err
-
 {-------------------------------------------------------------------------------
                       Tests machinery, Arbitrary instances
 -------------------------------------------------------------------------------}
-
-data DummyTarget
-
-instance TxId DummyTarget where
-    txId = Hash . B8.pack . show
 
 newtype DummyState = DummyState Int
     deriving (Show, Eq)

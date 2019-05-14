@@ -16,15 +16,20 @@ import Prelude
 import Cardano.Wallet
     ( unsafeRunExceptT )
 import Cardano.Wallet.DB
-    ( DBLayer (..)
-    , ErrNoSuchWallet (..)
-    , ErrWalletAlreadyExists (..)
-    , PrimaryKey (..)
-    )
+    ( DBLayer (..), ErrNoSuchWallet (..), PrimaryKey (..) )
 import Cardano.Wallet.DB.Sqlite
     ( newDBLayer )
 import Cardano.Wallet.DBSpec
-    ( KeyValPairs (..), lrp, once, once_, unions )
+    ( DummyTarget
+    , KeyValPairs (..)
+    , lrp
+    , once
+    , once_
+    , prop_createListWallet
+    , prop_createWalletTwice
+    , prop_removeWalletTwice
+    , unions
+    )
 import Cardano.Wallet.Primitive.AddressDiscovery
     ( IsOurs (..) )
 import Cardano.Wallet.Primitive.Model
@@ -38,7 +43,6 @@ import Cardano.Wallet.Primitive.Types
     , TxOut (..)
     , UTxO (..)
     , WalletId (..)
-    , WalletMetadata (..)
     )
 import Control.Concurrent.Async
     ( forConcurrently_ )
@@ -55,7 +59,7 @@ import Data.Functor.Identity
 import Data.Map.Strict
     ( Map )
 import Test.Hspec
-    ( Spec, describe, it, shouldBe, shouldReturn, xit )
+    ( Spec, before, describe, it, shouldBe, shouldReturn, xit )
 import Test.QuickCheck
     ( Arbitrary (..)
     , Property
@@ -68,18 +72,18 @@ import Test.QuickCheck
 import Test.QuickCheck.Monadic
     ( monadicIO, pick )
 
-import qualified Data.ByteString.Char8 as B8
 import qualified Data.List as L
 
 spec :: Spec
 spec = do
-    describe "Extra Properties about DB initialization" $ do
+    before (newDBLayer Nothing :: IO (DBLayer IO DummyState DummyTarget)) $
+        describe "Extra Properties about DB initialization" $ do
         it "createWallet . listWallets yields expected results"
-            (property prop_createListWallet)
+            (property . prop_createListWallet)
         xit "creating same wallet twice yields an error"
-            (property prop_createWalletTwice)
+            (property . prop_createWalletTwice)
         it "removing the same wallet twice yields an error"
-            (property prop_removeWalletTwice)
+            (property . prop_removeWalletTwice)
 
     describe "put . read yields a result" $ do
         xit "Checkpoint"
@@ -165,55 +169,6 @@ spec = do
 
 
 ---- FROM THIS CODE CAN PROBABLY BE SHARED WITH MVARSPEC and put to DBSpec
-
--- | Can list created wallets
-prop_createListWallet
-    :: KeyValPairs (PrimaryKey WalletId) (Wallet DummyState DummyTarget, WalletMetadata)
-    -> Property
-prop_createListWallet (KeyValPairs pairs) =
-    monadicIO (setup >>= prop)
-  where
-    setup = liftIO $ newDBLayer Nothing
-    prop db = liftIO $ do
-        res <- once pairs $ \(k, (cp, meta)) ->
-            unsafeRunExceptT $ createWallet db k cp meta
-        (length <$> listWallets db) `shouldReturn` length res
-
-
--- | Trying to create a same wallet twice should yield an error
-prop_createWalletTwice
-    :: ( PrimaryKey WalletId
-       , Wallet DummyState DummyTarget
-       , WalletMetadata
-       )
-    -> Property
-prop_createWalletTwice (key@(PrimaryKey wid), cp, meta) =
-    monadicIO (setup >>= prop)
-  where
-    setup = liftIO $ newDBLayer Nothing
-    prop db = liftIO $ do
-        let err = ErrWalletAlreadyExists wid
-        runExceptT (createWallet db key cp meta) `shouldReturn` Right ()
-        runExceptT (createWallet db key cp meta) `shouldReturn` Left err
-
--- | Trying to remove a same wallet twice should yield an error
-prop_removeWalletTwice
-    :: ( PrimaryKey WalletId
-       , Wallet DummyState DummyTarget
-       , WalletMetadata
-       )
-    -> Property
-prop_removeWalletTwice (key@(PrimaryKey wid), cp, meta) =
-    monadicIO (setup >>= prop)
-  where
-    setup = liftIO $ do
-        db <- newDBLayer Nothing
-        unsafeRunExceptT $ createWallet db key cp meta
-        return db
-    prop db = liftIO $ do
-        let err = ErrNoSuchWallet wid
-        runExceptT (removeWallet db key) `shouldReturn` Right ()
-        runExceptT (removeWallet db key) `shouldReturn` Left err
 
 -- | Checks that a given resource can be read after having been inserted in DB.
 prop_readAfterPut
@@ -421,11 +376,6 @@ prop_parallelPut putOp readOp resolve (KeyValPairs pairs) =
 instance Arbitrary (Wallet DummyState DummyTarget) where
     shrink _ = []
     arbitrary = initWallet <$> arbitrary
-
-data DummyTarget
-
-instance TxId DummyTarget where
-    txId = Hash . B8.pack . show
 
 -- wallet state is UTxO and Pending transactions
 newtype PendingTx = PendingTx [(TxIn, TxOut)]
