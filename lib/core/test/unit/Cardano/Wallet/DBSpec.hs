@@ -1,6 +1,9 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeApplications #-}
 
@@ -10,6 +13,8 @@ module Cardano.Wallet.DBSpec
     ( spec
     , KeyValPairs (..)
     , DummyTarget
+    , DummyStateMVar (..)
+    , DummyStateSqlite (..)
     , once
     , once_
     , lrp
@@ -17,6 +22,8 @@ module Cardano.Wallet.DBSpec
     , prop_createListWallet
     , prop_createWalletTwice
     , prop_removeWalletTwice
+    , prop_readAfterPut
+    , prop_putBeforeInit
     ) where
 
 import Prelude
@@ -36,7 +43,7 @@ import Cardano.Wallet.Primitive.AddressDerivation
 import Cardano.Wallet.Primitive.AddressDiscovery
     ( IsOurs (..) )
 import Cardano.Wallet.Primitive.Model
-    ( Wallet )
+    ( Wallet, initWallet )
 import Cardano.Wallet.Primitive.Types
     ( Address (..)
     , Coin (..)
@@ -64,7 +71,7 @@ import Control.Monad
 import Control.Monad.IO.Class
     ( liftIO )
 import Control.Monad.Trans.Except
-    ( runExceptT )
+    ( ExceptT, runExceptT )
 import Crypto.Hash
     ( hash )
 import Data.Functor.Identity
@@ -78,7 +85,7 @@ import GHC.Generics
 import System.IO.Unsafe
     ( unsafePerformIO )
 import Test.Hspec
-    ( Spec, shouldReturn )
+    ( Spec, shouldBe, shouldReturn )
 import Test.QuickCheck
     ( Arbitrary (..)
     , Gen
@@ -96,7 +103,7 @@ import Test.QuickCheck
 import Test.QuickCheck.Instances.Time
     ()
 import Test.QuickCheck.Monadic
-    ( monadicIO )
+    ( monadicIO, pick )
 
 import qualified Data.ByteArray as BA
 import qualified Data.ByteString as BS
@@ -143,6 +150,49 @@ data DummyTarget
 instance TxId DummyTarget where
     txId = Hash . B8.pack . show
 
+newtype DummyStateMVar = DummyStateMVar Int
+    deriving (Show, Eq)
+
+instance Arbitrary DummyStateMVar where
+    shrink _ = []
+    arbitrary = DummyStateMVar <$> arbitrary
+
+deriving instance NFData DummyStateMVar
+
+instance IsOurs DummyStateMVar where
+    isOurs _ num = (True, num)
+
+instance Arbitrary (Wallet DummyStateMVar DummyTarget) where
+    shrink _ = []
+    arbitrary = initWallet <$> arbitrary
+
+-- wallet state is UTxO and Pending transactions
+newtype PendingTx = PendingTx [(TxIn, TxOut)]
+    deriving (Show, Eq, NFData)
+
+instance Arbitrary PendingTx where
+    shrink _ = []
+    arbitrary = do
+        k <- choose (0, 6)
+        pending <- zip
+            <$> vectorOf k arbitrary
+            <*> vectorOf k arbitrary
+        return $ PendingTx pending
+
+newtype DummyStateSqlite = DummyStateSqlite (UTxO, PendingTx)
+    deriving (Show, Eq, NFData)
+
+instance Arbitrary DummyStateSqlite where
+    shrink _ = []
+    arbitrary = DummyStateSqlite <$> arbitrary
+
+instance IsOurs DummyStateSqlite where
+    isOurs _ wm = (True, wm)
+
+instance Arbitrary (Wallet DummyStateSqlite DummyTarget) where
+    shrink _ = []
+    arbitrary = initWallet <$> arbitrary
+
 instance Arbitrary (PrimaryKey WalletId) where
     shrink _ = []
     arbitrary = do
@@ -150,7 +200,6 @@ instance Arbitrary (PrimaryKey WalletId) where
         return $ PrimaryKey $ WalletId $ hash bytes
 
 deriving instance Show (PrimaryKey WalletId)
-
 
 instance Arbitrary (Hash "Tx") where
     shrink _ = []
@@ -306,3 +355,60 @@ prop_removeWalletTwice dbLayer (key@(PrimaryKey wid), cp, meta) =
         let err = ErrNoSuchWallet wid
         runExceptT (removeWallet db key) `shouldReturn` Right ()
         runExceptT (removeWallet db key) `shouldReturn` Left err
+
+-- | Checks that a given resource can be read after having been inserted in DB.
+prop_readAfterPut
+    :: (Show (f a), Eq (f a), Applicative f, Show s, Eq s, IsOurs s, NFData s, Arbitrary (Wallet s DummyTarget))
+    => (  DBLayer IO s DummyTarget
+       -> PrimaryKey WalletId
+       -> a
+       -> ExceptT ErrNoSuchWallet IO ()
+       ) -- ^ Put Operation
+    -> (  DBLayer IO s DummyTarget
+       -> PrimaryKey WalletId
+       -> IO (f a)
+       ) -- ^ Read Operation
+    -> DBLayer IO s DummyTarget
+    -> (PrimaryKey WalletId, a)
+        -- ^ Property arguments
+    -> Property
+prop_readAfterPut putOp readOp dbLayer (key, a) =
+    monadicIO (setup >>= prop)
+  where
+    setup = do
+        (cp, meta) <- pick arbitrary
+        liftIO $ unsafeRunExceptT $ createWallet dbLayer key cp meta
+        return dbLayer
+    prop db = liftIO $ do
+        unsafeRunExceptT $ putOp db key a
+        res <- readOp db key
+        res `shouldBe` pure a
+
+-- | Can't put resource before a wallet has been initialized
+prop_putBeforeInit
+    :: (Show (f a), Eq (f a), Applicative f, Show s, Eq s, IsOurs s, NFData s)
+    => (  DBLayer IO s DummyTarget
+       -> PrimaryKey WalletId
+       -> a
+       -> ExceptT ErrNoSuchWallet IO ()
+       ) -- ^ Put Operation
+    -> (  DBLayer IO s DummyTarget
+       -> PrimaryKey WalletId
+       -> IO (f a)
+       ) -- ^ Read Operation
+    -> f a
+        -- ^ An 'empty' value for the 'Applicative' f
+    -> DBLayer IO s DummyTarget
+    -> (PrimaryKey WalletId, a)
+        -- ^ Property arguments
+    -> Property
+prop_putBeforeInit putOp readOp empty dbLayer (key@(PrimaryKey wid), a) =
+    monadicIO (pure dbLayer >>= prop)
+  where
+    prop db = liftIO $ do
+        runExceptT (putOp db key a) >>= \case
+            Right _ ->
+                fail "expected put operation to fail but it succeeded!"
+            Left err ->
+                err `shouldBe` ErrNoSuchWallet wid
+        readOp db key `shouldReturn` empty

@@ -1,7 +1,5 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeApplications #-}
 
@@ -20,30 +18,23 @@ import Cardano.Wallet.DB
 import Cardano.Wallet.DB.Sqlite
     ( newDBLayer )
 import Cardano.Wallet.DBSpec
-    ( DummyTarget
+    ( DummyStateSqlite (..)
+    , DummyTarget
     , KeyValPairs (..)
     , lrp
     , once
     , once_
     , prop_createListWallet
     , prop_createWalletTwice
+    , prop_putBeforeInit
+    , prop_readAfterPut
     , prop_removeWalletTwice
     , unions
     )
 import Cardano.Wallet.Primitive.AddressDiscovery
     ( IsOurs (..) )
-import Cardano.Wallet.Primitive.Model
-    ( Wallet, initWallet )
 import Cardano.Wallet.Primitive.Types
-    ( Hash (..)
-    , Tx (..)
-    , TxId (..)
-    , TxIn (..)
-    , TxMeta (..)
-    , TxOut (..)
-    , UTxO (..)
-    , WalletId (..)
-    )
+    ( Hash (..), Tx (..), TxId (..), TxMeta (..), WalletId (..) )
 import Control.Concurrent.Async
     ( forConcurrently_ )
 import Control.DeepSeq
@@ -53,7 +44,7 @@ import Control.Monad
 import Control.Monad.IO.Class
     ( liftIO )
 import Control.Monad.Trans.Except
-    ( ExceptT, runExceptT )
+    ( ExceptT )
 import Data.Functor.Identity
     ( Identity (..) )
 import Data.Map.Strict
@@ -61,14 +52,7 @@ import Data.Map.Strict
 import Test.Hspec
     ( Spec, before, describe, it, shouldBe, shouldReturn, xit )
 import Test.QuickCheck
-    ( Arbitrary (..)
-    , Property
-    , checkCoverage
-    , choose
-    , cover
-    , property
-    , vectorOf
-    )
+    ( Arbitrary (..), Property, checkCoverage, cover, property )
 import Test.QuickCheck.Monadic
     ( monadicIO, pick )
 
@@ -76,7 +60,7 @@ import qualified Data.List as L
 
 spec :: Spec
 spec = do
-    before (newDBLayer Nothing :: IO (DBLayer IO DummyState DummyTarget)) $
+    before (newDBLayer Nothing :: IO (DBLayer IO DummyStateSqlite DummyTarget)) $
         describe "Extra Properties about DB initialization" $ do
         it "createWallet . listWallets yields expected results"
             (property . prop_createListWallet)
@@ -85,25 +69,27 @@ spec = do
         it "removing the same wallet twice yields an error"
             (property . prop_removeWalletTwice)
 
-    describe "put . read yields a result" $ do
+    before (newDBLayer Nothing :: IO (DBLayer IO DummyStateSqlite DummyTarget)) $
+        describe "put . read yields a result" $ do
         xit "Checkpoint"
-            (property $ prop_readAfterPut putCheckpoint readCheckpoint)
+            (property . (prop_readAfterPut putCheckpoint readCheckpoint))
         xit "Wallet Metadata"
-            (property $ prop_readAfterPut putWalletMeta readWalletMeta)
+            (property . (prop_readAfterPut putWalletMeta readWalletMeta))
         xit "Tx History"
-            (property $ prop_readAfterPut putTxHistory readTxHistoryF)
+            (property . (prop_readAfterPut putTxHistory readTxHistoryF))
         it "Private Key"
-            (property $ prop_readAfterPut putPrivateKey readPrivateKey)
+            (property . (prop_readAfterPut putPrivateKey readPrivateKey))
 
-    describe "can't put before wallet exists" $ do
+    before (newDBLayer Nothing :: IO (DBLayer IO DummyStateSqlite DummyTarget)) $
+        describe "can't put before wallet exists" $ do
         xit "Checkpoint"
-            (property $ prop_putBeforeInit putCheckpoint readCheckpoint Nothing)
+            (property . (prop_putBeforeInit putCheckpoint readCheckpoint Nothing))
         it "Wallet Metadata"
-            (property $ prop_putBeforeInit putWalletMeta readWalletMeta Nothing)
+            (property . (prop_putBeforeInit putWalletMeta readWalletMeta Nothing))
         it "Tx History"
-            (property $ prop_putBeforeInit putTxHistory readTxHistoryF (pure mempty))
+            (property . (prop_putBeforeInit putTxHistory readTxHistoryF (pure mempty)))
         it "Private Key"
-            (property $ prop_putBeforeInit putPrivateKey readPrivateKey Nothing)
+            (property . (prop_putBeforeInit putPrivateKey readPrivateKey Nothing))
 
     describe "put doesn't affect other resources" $ do
         xit "Checkpoint vs Wallet Metadata & Tx History & Private Key"
@@ -170,62 +156,6 @@ spec = do
 
 ---- FROM THIS CODE CAN PROBABLY BE SHARED WITH MVARSPEC and put to DBSpec
 
--- | Checks that a given resource can be read after having been inserted in DB.
-prop_readAfterPut
-    :: (Show (f a), Eq (f a), Applicative f)
-    => (  DBLayer IO DummyState DummyTarget
-       -> PrimaryKey WalletId
-       -> a
-       -> ExceptT ErrNoSuchWallet IO ()
-       ) -- ^ Put Operation
-    -> (  DBLayer IO DummyState DummyTarget
-       -> PrimaryKey WalletId
-       -> IO (f a)
-       ) -- ^ Read Operation
-    -> (PrimaryKey WalletId, a)
-        -- ^ Property arguments
-    -> Property
-prop_readAfterPut putOp readOp (key, a) =
-    monadicIO (setup >>= prop)
-  where
-    setup = do
-        db <- liftIO $ newDBLayer Nothing
-        (cp, meta) <- pick arbitrary
-        liftIO $ unsafeRunExceptT $ createWallet db key cp meta
-        return db
-    prop db = liftIO $ do
-        unsafeRunExceptT $ putOp db key a
-        res <- readOp db key
-        res `shouldBe` pure a
-
--- | Can't put resource before a wallet has been initialized
-prop_putBeforeInit
-    :: (Show (f a), Eq (f a), Applicative f)
-    => (  DBLayer IO DummyState DummyTarget
-       -> PrimaryKey WalletId
-       -> a
-       -> ExceptT ErrNoSuchWallet IO ()
-       ) -- ^ Put Operation
-    -> (  DBLayer IO DummyState DummyTarget
-       -> PrimaryKey WalletId
-       -> IO (f a)
-       ) -- ^ Read Operation
-    -> f a
-        -- ^ An 'empty' value for the 'Applicative' f
-    -> (PrimaryKey WalletId, a)
-        -- ^ Property arguments
-    -> Property
-prop_putBeforeInit putOp readOp empty (key@(PrimaryKey wid), a) =
-    monadicIO (setup >>= prop)
-  where
-    setup = liftIO $ newDBLayer Nothing
-    prop db = liftIO $ do
-        runExceptT (putOp db key a) >>= \case
-            Right _ ->
-                fail "expected put operation to fail but it succeeded!"
-            Left err ->
-                err `shouldBe` ErrNoSuchWallet wid
-        readOp db key `shouldReturn` empty
 
 -- | Modifying one resource leaves the other untouched
 prop_isolation
@@ -233,20 +163,20 @@ prop_isolation
        , Applicative g, Show (g c), Eq (g c)
        , Applicative h, Show (h d), Eq (h d)
        )
-    => (  DBLayer IO DummyState DummyTarget
+    => (  DBLayer IO DummyStateSqlite DummyTarget
        -> PrimaryKey WalletId
        -> a
        -> ExceptT ErrNoSuchWallet IO ()
        ) -- ^ Put Operation
-    -> (  DBLayer IO DummyState DummyTarget
+    -> (  DBLayer IO DummyStateSqlite DummyTarget
        -> PrimaryKey WalletId
        -> IO (f b)
        ) -- ^ Read Operation for another resource
-    -> (  DBLayer IO DummyState DummyTarget
+    -> (  DBLayer IO DummyStateSqlite DummyTarget
        -> PrimaryKey WalletId
        -> IO (g c)
        ) -- ^ Read Operation for another resource
-    -> (  DBLayer IO DummyState DummyTarget
+    -> (  DBLayer IO DummyStateSqlite DummyTarget
        -> PrimaryKey WalletId
        -> IO (h d)
        ) -- ^ Read Operation for another resource
@@ -276,7 +206,7 @@ prop_isolation putA readB readC readD (key, a) =
 -- | Can't read back data after delete
 prop_readAfterDelete
     :: (Show (f a), Eq (f a), Applicative f)
-    => (  DBLayer IO DummyState DummyTarget
+    => (  DBLayer IO DummyStateSqlite DummyTarget
        -> PrimaryKey WalletId
        -> IO (f a)
        ) -- ^ Read Operation
@@ -299,12 +229,12 @@ prop_readAfterDelete readOp empty key =
 -- | Check that the DB supports multiple sequential puts for a given resource
 prop_sequentialPut
     :: (Show (f a), Eq (f a), Applicative f)
-    => (  DBLayer IO DummyState DummyTarget
+    => (  DBLayer IO DummyStateSqlite DummyTarget
        -> PrimaryKey WalletId
        -> a
        -> ExceptT ErrNoSuchWallet IO ()
        ) -- ^ Put Operation
-    -> (  DBLayer IO DummyState DummyTarget
+    -> (  DBLayer IO DummyStateSqlite DummyTarget
        -> PrimaryKey WalletId
        -> IO (f a)
        ) -- ^ Read Operation
@@ -335,12 +265,12 @@ prop_sequentialPut putOp readOp resolve (KeyValPairs pairs) =
 -- | Check that the DB supports multiple sequential puts for a given resource
 prop_parallelPut
     :: (Show (f a), Eq (f a), Applicative f)
-    => (  DBLayer IO DummyState DummyTarget
+    => (  DBLayer IO DummyStateSqlite DummyTarget
        -> PrimaryKey WalletId
        -> a
        -> ExceptT ErrNoSuchWallet IO ()
        ) -- ^ Put Operation
-    -> (  DBLayer IO DummyState DummyTarget
+    -> (  DBLayer IO DummyStateSqlite DummyTarget
        -> PrimaryKey WalletId
        -> IO (f a)
        ) -- ^ Read Operation
@@ -367,35 +297,3 @@ prop_parallelPut putOp readOp resolve (KeyValPairs pairs) =
         forConcurrently_ pairs $ unsafeRunExceptT . uncurry (putOp db)
         res <- once pairs (readOp db . fst)
         length res `shouldBe` resolve pairs
-
-
-{-------------------------------------------------------------------------------
-                            Arbitrary Instances
--------------------------------------------------------------------------------}
-
-instance Arbitrary (Wallet DummyState DummyTarget) where
-    shrink _ = []
-    arbitrary = initWallet <$> arbitrary
-
--- wallet state is UTxO and Pending transactions
-newtype PendingTx = PendingTx [(TxIn, TxOut)]
-    deriving (Show, Eq, NFData)
-
-instance Arbitrary PendingTx where
-    shrink _ = []
-    arbitrary = do
-        k <- choose (0, 6)
-        pending <- zip
-            <$> vectorOf k arbitrary
-            <*> vectorOf k arbitrary
-        return $ PendingTx pending
-
-newtype DummyState = DummyState (UTxO, PendingTx)
-    deriving (Show, Eq, NFData)
-
-instance Arbitrary DummyState where
-    shrink _ = []
-    arbitrary = DummyState <$> arbitrary
-
-instance IsOurs DummyState where
-    isOurs _ wm = (True, wm)
