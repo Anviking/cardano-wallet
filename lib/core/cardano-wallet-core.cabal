@@ -120,12 +120,14 @@ test-suite unit
     , memory
     , QuickCheck
     , quickcheck-instances
+    , quickcheck-state-machine >= 0.6.0
     , servant-server
     , servant-swagger
     , swagger2
     , text
     , text-class
     , transformers
+    , tree-diff
     , yaml
     , persistent
     , persistent-sqlite
@@ -144,6 +146,7 @@ test-suite unit
       Cardano.Wallet.DB.MVarSpec
       Cardano.Wallet.DB.SqliteSpec
       Cardano.Wallet.DBSpec
+      Cardano.Wallet.DBSpec2
       Cardano.EnvironmentSpec
       Cardano.Wallet.NetworkSpec
       Cardano.Wallet.Primitive.AddressDerivationSpec
