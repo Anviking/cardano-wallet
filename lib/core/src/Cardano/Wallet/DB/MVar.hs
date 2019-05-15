@@ -21,6 +21,7 @@ import Cardano.Wallet.DB
     , ErrNoSuchWallet (..)
     , ErrWalletAlreadyExists (..)
     , PrimaryKey (..)
+    , PersistState (..)
     )
 import Cardano.Wallet.Primitive.AddressDerivation
     ( Depth (..), Key, XPrv )
@@ -53,7 +54,7 @@ data Database s t = Database
 -- | Instantiate a new in-memory "database" layer that simply stores data in
 -- a local MVar. Data vanishes if the software is shut down.
 newDBLayer
-    :: forall s t. (IsOurs s, NFData s, Show s, TxId t)
+    :: forall s t. (IsOurs s, PersistState s, NFData s, Show s, TxId t)
     => IO (DBLayer IO s t)
 newDBLayer = do
     lock <- newMVar ()

@@ -25,7 +25,7 @@ import Prelude
 import Cardano.Crypto.Wallet
     ( XPrv, unXPrv )
 import Cardano.Wallet.DB
-    ( DBLayer (..), ErrNoSuchWallet (..), PrimaryKey (..) )
+    ( DBLayer (..), ErrNoSuchWallet (..), PersistState (..), PrimaryKey (..) )
 import Cardano.Wallet.DB.SqliteTypes
     ( AddressScheme (..), TxId (..) )
 import Cardano.Wallet.Primitive.AddressDerivation
@@ -287,7 +287,7 @@ runQuery conn = ExceptT . try . runResourceT . runNoLoggingT . flip runSqlConn c
 -- If the given file path does not exist, it will be created by the sqlite
 -- library.
 newDBLayer
-    :: forall s t. (IsOurs s, NFData s, Show s, W.TxId t)
+    :: forall s t. (IsOurs s, PersistState s, NFData s, Show s, W.TxId t)
     => Maybe FilePath
        -- ^ Database file location, or Nothing for in-memory database
     -> IO (DBLayer IO s t)
@@ -302,7 +302,7 @@ newDBLayer fp = do
 
         { createWallet = \(PrimaryKey wid) cp meta ->
             ExceptT $ unsafeRunQuery conn $ Right <$> do
-                insert_ (mkWalletEntity wid meta)
+                insert_ (mkWalletEntity wid meta (toEnum $ addressScheme cp))
                 insertCheckpoint wid cp
 
         , removeWallet = \(PrimaryKey wid) ->
@@ -405,8 +405,8 @@ delegationFromText :: Maybe Text -> W.WalletDelegation W.PoolId
 delegationFromText Nothing = W.NotDelegating
 delegationFromText (Just pool) = W.Delegating (W.PoolId pool)
 
-mkWalletEntity :: W.WalletId -> W.WalletMetadata -> Wallet
-mkWalletEntity wid meta = Wallet
+mkWalletEntity :: W.WalletId -> W.WalletMetadata -> AddressScheme -> Wallet
+mkWalletEntity wid meta s = Wallet
     { walTableId = wid
     , walTableName = meta ^. #name . coerce
     , walTablePassphraseLastUpdatedAt = case meta ^. #passphraseInfo of
@@ -414,7 +414,7 @@ mkWalletEntity wid meta = Wallet
             Just (W.WalletPassphraseInfo passInfo) -> Just passInfo
     , walTableStatus = meta ^. #status
     , walTableDelegation = delegationToText $ meta ^. #delegation
-    , walTableAddressScheme = Sequential -- fixme: depends on wallet
+    , walTableAddressScheme = s
     }
 
 mkWalletMetadataUpdate :: W.WalletMetadata -> [Update Wallet]
@@ -605,7 +605,7 @@ selectWallet :: MonadIO m => W.WalletId -> ReaderT SqlBackend m (Maybe Wallet)
 selectWallet wid = fmap entityVal <$> selectFirst [WalTableId ==. wid] []
 
 insertCheckpoint
-    :: (MonadIO m, W.TxId t)
+    :: (MonadIO m, PersistState s, W.TxId t)
     => W.WalletId
     -> W.Wallet s t
     -> ReaderT SqlBackend m ()

@@ -23,6 +23,10 @@ import Cardano.Wallet.Primitive.Types
     )
 import Control.Monad
     ( (>=>) )
+import Control.Monad.IO.Class
+    ( MonadIO (..) )
+import Control.Monad.Trans.Reader
+    ( ReaderT (..) )
 import Data.Aeson
     ( FromJSON (..)
     , ToJSON (..)
@@ -52,7 +56,7 @@ import Data.Text.Class
 import Data.Word
     ( Word64, Word8 )
 import Database.Persist.Sqlite
-    ( PersistField (..), PersistFieldSql (..), PersistValue )
+    ( PersistField (..), PersistFieldSql (..), PersistValue, SqlBackend )
 import GHC.Generics
     ( Generic )
 import Web.HttpApiData
@@ -61,6 +65,7 @@ import Web.PathPieces
     ( PathPiece (..) )
 
 import qualified Data.Text as T
+
 
 ----------------------------------------------------------------------------
 -- Helper functions
@@ -130,7 +135,7 @@ instance PathPiece WalletId where
 ----------------------------------------------------------------------------
 -- AddressScheme
 
-data AddressScheme = Sequential | Random | Any deriving (Show, Eq, Generic)
+data AddressScheme = Sequential | Random | Any deriving (Show, Eq, Generic, Enum)
 
 instance PersistField AddressScheme where
     toPersistValue = toPersistValue . toText

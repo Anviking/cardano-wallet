@@ -12,6 +12,7 @@ module Cardano.Wallet.DB
     ( -- * Interface
       DBLayer(..)
     , PrimaryKey(..)
+    , PersistState(..)
 
       -- * Errors
     , ErrNoSuchWallet(..)
@@ -30,6 +31,8 @@ import Cardano.Wallet.Primitive.Types
     ( Hash, Tx, TxId, TxMeta, WalletId, WalletMetadata )
 import Control.DeepSeq
     ( NFData )
+import Control.Monad.IO.Class
+    ( MonadIO (..) )
 import Control.Monad.Trans.Except
     ( ExceptT )
 import Data.Map.Strict
@@ -39,7 +42,7 @@ import Data.Map.Strict
 -- | A Database interface for storing various things in a DB. In practice,
 -- we'll need some extra contraints on the wallet state that allows us to
 -- serialize and unserialize it (e.g. @forall s. (Serialize s) => ...@)
-data (IsOurs s, NFData s, Show s, TxId t) => DBLayer m s t = DBLayer
+data (IsOurs s, NFData s, Show s, PersistState s, TxId t) => DBLayer m s t = DBLayer
     { createWallet
         :: PrimaryKey WalletId
         -> Wallet s t
@@ -150,3 +153,13 @@ newtype ErrWalletAlreadyExists
 -- (like for instance, the last known network tip).
 newtype PrimaryKey key = PrimaryKey key
     deriving (Eq, Ord)
+
+----------------------------------------------------------------------------
+
+class PersistState s where
+    putState :: MonadIO m => Wallet s t -> s -> m ()
+    readState :: MonadIO m => Wallet s t -> m (Maybe s)
+    addressScheme :: Wallet s t -> Int
+    -- putState :: MonadIO m => (WalletId, SlotId) -> s -> ReaderT SqlBackend m ()
+    -- readState :: MonadIO m => (WalletId, SlotId) -> ReaderT SqlBackend m (Maybe s)
+    -- addressScheme :: s -> AddressScheme
