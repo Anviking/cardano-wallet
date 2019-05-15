@@ -439,40 +439,21 @@ syndrome residue = low
   where
     low = residue .&. 0x1f
 
+
 locateErrors :: Int -> Int -> [Int]
-locateErrors residue len =
-    if residue == 0 then [] else
-    if l_s0 /= -1
-            && l_s1 /= -1
-            && l_s2 /= -1
-            && (2 * l_s1 - l_s2 - l_s0 + 2046) `mod` 1023 == 0
-        then
-            let p1 = (l_s1 - l_s0 + 1023) `mod` 1023 in
-            if (p1 >= len) then [] else
-            let l_e1 = l_s0 + (1023 - 997) * p1 in
-            if (l_e1 `mod` 33 > 0) then [] else [p1]
-        else
-            let findError p1 =
-                    let s2_s1p1 = s2 `xor` (if s1 == 0 then 0 else gf_1024_exp Arr.! ((l_s1 + p1) `mod` 1023)) in
-                    if (s2_s1p1 == 0) then [] else
-                    let s1_s0p1 = s1 `xor` (if s0 == 0 then 0 else gf_1024_exp Arr.! ((l_s0 + p1) `mod` 1023)) in
-                    if (s1_s0p1 == 0) then [] else
-                    let l_s1_s0p1 = gf_1024_log Arr.! s1_s0p1 in
-                    let p2 = ((gf_1024_log Arr.! s2_s1p1) - l_s1_s0p1 + 1023) `mod` 1023 in
-                    if (p2 >= len || p1 == p2) then [] else
-                    let s1_s0p2 = s1 `xor` (if s0 == 0 then 0 else gf_1024_exp Arr.! ((l_s0 + p2) `mod` 1023)) in
-                    if (s1_s0p2 == 0) then [] else
-                    let inv_p1_p2 = 1023 - (gf_1024_log Arr.! (gf_1024_exp Arr.! p1)) `xor` (gf_1024_exp Arr.! p2) in
-                    let l_e2 = l_s1_s0p1 + inv_p1_p2 + (1023 - 997) * p2 in
-                    if (l_e2 `mod` 33 > 0) then [] else
-                    let l_e1 = (gf_1024_log Arr.! s1_s0p2) + inv_p1_p2 + (1023 - 997) * p1 in
-                    if (l_e1 `mod` 33 > 0) then [] else
-                    if (p1 < p2)
-                        then [p1, p2]
-                        else [p2, p1] in
-            case filter (not . null) $ map findError [0 .. len - 1] of
-                []     -> []
-                es : _ -> es
+locateErrors residue len
+    | residue == 0 = []
+    | l_s0 /= -1 &&
+      l_s1 /= -1 &&
+      l_s2 /= -1 && (2 * l_s1 - l_s2 - l_s0 + 2046) `mod` 1023 == 0 =
+          let p1 = (l_s1 - l_s0 + 1023) `mod` 1023 in
+          if (p1 >= len) then [] else
+          let l_e1 = l_s0 + (1023 - 997) * p1 in
+          if (l_e1 `mod` 33 > 0) then [] else [p1]
+    | otherwise =
+          case filter (not . null) $ map findError [0 .. len - 1] of
+              []     -> []
+              es : _ -> es
   where
     syn = syndrome residue
     s0 = syn .&. 0x3FF
@@ -481,4 +462,30 @@ locateErrors residue len =
     l_s0 = gf_1024_log Arr.! s0
     l_s1 = gf_1024_log Arr.! s1
     l_s2 = gf_1024_log Arr.! s2
+
+    findError :: Int -> [Int]
+    findError p1
+        | s2_s1p1 == 0      = []
+        | s1_s0p1 == 0      = []
+        | p2 >= len         = []
+        | p1 == p2          = []
+        | s1_s0p2 == 0      = []
+        | l_e2 `mod` 33 > 0 = []
+        | l_e1 `mod` 33 > 0 = []
+        | (p1 < p2)         = [p1, p2]
+        | otherwise         = [p2, p1]
+      where
+        inv_p1_p2 = 1023 -
+            (gf_1024_log Arr.! (gf_1024_exp Arr.! p1)) `xor`
+            (gf_1024_exp Arr.! p2)
+        l_e1 = (gf_1024_log Arr.! s1_s0p2) + inv_p1_p2 + (1023 - 997) * p1
+        l_e2 = l_s1_s0p1 + inv_p1_p2 + (1023 - 997) * p2
+        l_s1_s0p1 = gf_1024_log Arr.! s1_s0p1
+        p2 = ((gf_1024_log Arr.! s2_s1p1) - l_s1_s0p1 + 1023) `mod` 1023
+        s1_s0p1 = s1 `xor`
+            (if s0 == 0 then 0 else gf_1024_exp Arr.! ((l_s0 + p1) `mod` 1023))
+        s1_s0p2 = s1 `xor`
+            (if s0 == 0 then 0 else gf_1024_exp Arr.! ((l_s0 + p2) `mod` 1023))
+        s2_s1p1 = s2 `xor`
+            (if s1 == 0 then 0 else gf_1024_exp Arr.! ((l_s1 + p1) `mod` 1023))
 
