@@ -7,7 +7,9 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
 
@@ -22,7 +24,9 @@ import Prelude hiding
 
 import Control.Monad.Trans.Except
     ( runExceptT )
+import Data.Bifoldable
 import Data.Bifunctor
+import Data.Bitraversable
 import Data.Foldable
     ( toList )
 import Data.Functor.Classes
@@ -73,9 +77,12 @@ import Test.Hspec
 import Test.QuickCheck
     ( Arbitrary (..), Gen, Property, quickCheck )
 
+import Cardano.Wallet.DB.TestWallet
+
 import qualified Data.ByteString.Char8 as B8
 
 import qualified Cardano.Wallet.DB.MVar as MVar
+import qualified Data.Bifunctor.TH as TH
 import qualified Data.Map as Map
 import qualified Data.Text as T
 
@@ -84,9 +91,21 @@ import qualified Test.QuickCheck.Monadic as QC
 -- import qualified Test.QuickCheck.Random as QC
 
 import Test.StateMachine
--- import qualified Test.StateMachine.Sequential as QSM
 import qualified Test.StateMachine.Types as QSM
 import qualified Test.StateMachine.Types.Rank2 as Rank2
+
+{-------------------------------------------------------------------------------
+  WalletId expressions
+-------------------------------------------------------------------------------}
+
+data Expr fp =
+    Val MWid
+  | Var fp
+  deriving (Show, Functor, Foldable, Traversable)
+
+eval :: Expr MWid -> MWid
+eval (Val f) = f
+eval (Var f) = f
 
 {-------------------------------------------------------------------------------
   Errors
@@ -123,6 +142,9 @@ instance Enum MConn where
 
 widPK :: MWid -> PrimaryKey WalletId
 widPK (MWid wid) = PrimaryKey wid
+
+widPK' :: Expr MWid -> PrimaryKey WalletId
+widPK' expr = widPK (eval expr)
 
 pkWid :: PrimaryKey WalletId -> MWid
 pkWid (PrimaryKey wid) = MWid wid
@@ -205,53 +227,66 @@ mReadPrivateKey wid m@(M cp _ _ pk _)
 
 type TxHistory = Map (Hash "Tx") (Tx, TxMeta)
 
-data Cmd conn
+data Cmd wid conn
     = Open
     | Close conn
-    | CreateWallet conn MWid MWallet WalletMetadata
-    | RemoveWallet conn MWid
+    | CreateWallet conn MWid MWallet WalletMetadata -- fixme: MWid -> wid
+    | RemoveWallet conn (Expr wid)
     | ListWallets conn
-    | PutCheckpoint conn MWid MWallet
-    | ReadCheckpoint conn MWid
-    | PutWalletMeta conn MWid WalletMetadata
-    | ReadWalletMeta conn MWid
-    | PutTxHistory conn MWid TxHistory
-    | ReadTxHistory conn MWid
-    | PutPrivateKey conn MWid MPrivKey
-    | ReadPrivateKey conn MWid
+    | PutCheckpoint conn (Expr wid) MWallet
+    | ReadCheckpoint conn (Expr wid)
+    | PutWalletMeta conn (Expr wid) WalletMetadata
+    | ReadWalletMeta conn (Expr wid)
+    | PutTxHistory conn (Expr wid) TxHistory
+    | ReadTxHistory conn (Expr wid)
+    | PutPrivateKey conn (Expr wid) MPrivKey
+    | ReadPrivateKey conn (Expr wid)
   deriving (Show, Functor, Foldable, Traversable)
 
-data Success conn =
+data Success wid conn =
     Unit ()
   | Connection conn
-  | WalletIds [MWid]
+  | NewWallet wid
+  | WalletIds [wid]
   | Checkpoint (Maybe MWallet)
   | Metadata (Maybe WalletMetadata)
   | TxHistory TxHistory
   | PrivateKey (Maybe MPrivKey)
   deriving (Show, Eq, Functor, Foldable, Traversable)
 
-newtype Resp conn = Resp (Either Err (Success conn))
+newtype Resp wid conn = Resp (Either Err (Success wid conn))
   deriving (Show, Eq, Functor, Foldable, Traversable)
+
+TH.deriveBifunctor     ''Cmd
+TH.deriveBifoldable    ''Cmd
+TH.deriveBitraversable ''Cmd
+
+TH.deriveBifunctor     ''Success
+TH.deriveBifoldable    ''Success
+TH.deriveBitraversable ''Success
+
+TH.deriveBifunctor     ''Resp
+TH.deriveBifoldable    ''Resp
+TH.deriveBitraversable ''Resp
 
 {-------------------------------------------------------------------------------
   Interpreter: mock implementation
 -------------------------------------------------------------------------------}
 
-runMock :: Cmd MConn -> Mock -> (Resp MConn, Mock)
+runMock :: Cmd MWid MConn -> Mock -> (Resp MWid MConn, Mock)
 runMock (Open)                        = first (Resp . fmap Connection) . mOpen
 runMock (Close c)                     = first (Resp . fmap Unit)       . mClose c
-runMock (CreateWallet _ wid wal meta) = first (Resp . fmap Unit)       . mCreateWallet wid wal meta
-runMock (RemoveWallet _ wid)          = first (Resp . fmap Unit)       . mRemoveWallet wid
+runMock (CreateWallet _ wid wal meta) = first (Resp . fmap (const (NewWallet wid))) . mCreateWallet wid wal meta
+runMock (RemoveWallet _ wid)          = first (Resp . fmap Unit)       . mRemoveWallet (eval wid)
 runMock (ListWallets _)               = first (Resp . fmap WalletIds)  . mListWallets
-runMock (PutCheckpoint _ wid wal)     = first (Resp . fmap Unit)       . mPutCheckpoint wid wal
-runMock (ReadCheckpoint _ wid)        = first (Resp . fmap Checkpoint) . mReadCheckpoint wid
-runMock (PutWalletMeta _ wid meta)    = first (Resp . fmap Unit)       . mPutWalletMeta wid meta
-runMock (ReadWalletMeta _ wid)        = first (Resp . fmap Metadata)   . mReadWalletMeta wid
-runMock (PutTxHistory _ wid txs)      = first (Resp . fmap Unit)       . mPutTxHistory wid txs
-runMock (ReadTxHistory _ wid)         = first (Resp . fmap TxHistory)  . mReadTxHistory wid
-runMock (PutPrivateKey _ wid pk)      = first (Resp . fmap Unit)       . mPutPrivateKey wid pk
-runMock (ReadPrivateKey _ wid)        = first (Resp . fmap PrivateKey) . mReadPrivateKey wid
+runMock (PutCheckpoint _ wid wal)     = first (Resp . fmap Unit)       . mPutCheckpoint (eval wid) wal
+runMock (ReadCheckpoint _ wid)        = first (Resp . fmap Checkpoint) . mReadCheckpoint (eval wid)
+runMock (PutWalletMeta _ wid meta)    = first (Resp . fmap Unit)       . mPutWalletMeta (eval wid) meta
+runMock (ReadWalletMeta _ wid)        = first (Resp . fmap Metadata)   . mReadWalletMeta (eval wid)
+runMock (PutTxHistory _ wid txs)      = first (Resp . fmap Unit)       . mPutTxHistory (eval wid) txs
+runMock (ReadTxHistory _ wid)         = first (Resp . fmap TxHistory)  . mReadTxHistory (eval wid)
+runMock (PutPrivateKey _ wid pk)      = first (Resp . fmap Unit)       . mPutPrivateKey (eval wid) pk
+runMock (ReadPrivateKey _ wid)        = first (Resp . fmap PrivateKey) . mReadPrivateKey (eval wid)
 
 {-------------------------------------------------------------------------------
   Interpreter: real I/O
@@ -299,24 +334,24 @@ nextHandle conns = maximum (map dbLayerHandle conns) + 1
 
 runIO
     :: IO DBLayerTest
-    -> Cmd DBLayerTest
-    -> IO (Resp DBLayerTest)
+    -> Cmd MWid DBLayerTest
+    -> IO (Resp MWid DBLayerTest)
 runIO connect = fmap Resp . go
   where
-    go :: Cmd DBLayerTest -> IO (Either Err (Success DBLayerTest))
+    go :: Cmd MWid DBLayerTest -> IO (Either Err (Success MWid DBLayerTest))
     go (Open) = Right . Connection <$> connect
     go (Close _db) = pure (Right (Unit ()))
     go (CreateWallet db wid wal meta) = bimap errWalletAlreadyExists Unit <$> runExceptT (createWallet (dbLayer db) (widPK wid) wal meta)
-    go (RemoveWallet db wid) = catchNoSuchWallet Unit $ removeWallet (dbLayer db) (widPK wid)
+    go (RemoveWallet db wid) = catchNoSuchWallet Unit $ removeWallet (dbLayer db) (widPK' wid)
     go (ListWallets db) = Right . WalletIds . fmap pkWid <$> listWallets (dbLayer db)
-    go (PutCheckpoint db wid wal) = catchNoSuchWallet Unit $ putCheckpoint (dbLayer db) (widPK wid) wal
-    go (ReadCheckpoint db wid) = Right . Checkpoint <$> readCheckpoint (dbLayer db) (widPK wid)
-    go (PutWalletMeta db wid meta) = catchNoSuchWallet Unit $ putWalletMeta (dbLayer db) (widPK wid) meta
-    go (ReadWalletMeta db wid) = Right . Metadata <$> readWalletMeta (dbLayer db) (widPK wid)
-    go (PutTxHistory db wid txs) = catchNoSuchWallet Unit $ putTxHistory (dbLayer db) (widPK wid) txs
-    go (ReadTxHistory db wid) = Right . TxHistory <$> readTxHistory (dbLayer db) (widPK wid)
-    -- go (PutPrivateKey db wid pk) = catchNoSuchWallet Unit $ putPrivateKey (dbLayer db) (widPK wid) pk
-    -- go (ReadPrivateKey db wid) = Right . PrivateKey <$> readPrivateKey (dbLayer db) (widPK wid)
+    go (PutCheckpoint db wid wal) = catchNoSuchWallet Unit $ putCheckpoint (dbLayer db) (widPK' wid) wal
+    go (ReadCheckpoint db wid) = Right . Checkpoint <$> readCheckpoint (dbLayer db) (widPK' wid)
+    go (PutWalletMeta db wid meta) = catchNoSuchWallet Unit $ putWalletMeta (dbLayer db) (widPK' wid) meta
+    go (ReadWalletMeta db wid) = Right . Metadata <$> readWalletMeta (dbLayer db) (widPK' wid)
+    go (PutTxHistory db wid txs) = catchNoSuchWallet Unit $ putTxHistory (dbLayer db) (widPK' wid) txs
+    go (ReadTxHistory db wid) = Right . TxHistory <$> readTxHistory (dbLayer db) (widPK' wid)
+    -- go (PutPrivateKey db wid pk) = catchNoSuchWallet Unit $ putPrivateKey (dbLayer db) (widPK' wid) pk
+    -- go (ReadPrivateKey db wid) = Right . PrivateKey <$> readPrivateKey (dbLayer db) (widPK' wid)
     go (PutPrivateKey{}) = error "todo PutPrivateKey"
     go (ReadPrivateKey{}) = error "todo ReadPrivateKey"
 
@@ -326,9 +361,9 @@ runIO connect = fmap Resp . go
   Working with references
 -------------------------------------------------------------------------------}
 
-newtype At f r = At (f (Reference DBLayerTest r))
+newtype At f r = At (f (Reference MWid r) (Reference DBLayerTest r))
 
-deriving instance Show (f (Reference DBLayerTest r)) => Show (At f r)
+deriving instance Show (f (Reference MWid r) (Reference DBLayerTest r)) => Show (At f r)
 
 type f :@ r = At f r
 
@@ -342,20 +377,21 @@ env ! r = fromJust (lookup r env)
 -------------------------------------------------------------------------------}
 
 type ConnRefs r = RefEnv DBLayerTest MConn r
+type WidRefs  r = RefEnv MWid        MWid  r -- fixme: WalletId -> MWid
 
-data Model r = Model Mock (ConnRefs r)
+data Model r = Model Mock (WidRefs r) (ConnRefs r)
   deriving (Generic)
 
 deriving instance Show1 r => Show (Model r)
 
 initModel :: Model r
-initModel = Model emptyMock []
+initModel = Model emptyMock [] []
 
-toMock :: (Functor f, Eq1 r) => Model r -> f :@ r -> f MConn
-toMock (Model _ hs) (At fr) = (hs !) <$> fr
+toMock :: (Bifunctor f, Eq1 r) => Model r -> f :@ r -> f MWid MConn
+toMock (Model _ wids conns) (At fr) = bimap (wids !) (conns !) fr
 
-step :: Eq1 r => Model r -> Cmd :@ r -> (Resp MConn, Mock)
-step m@(Model mock _) c = runMock (toMock m c) mock
+step :: Eq1 r => Model r -> Cmd :@ r -> (Resp MWid MConn, Mock)
+step m@(Model mock _ _) c = runMock (toMock m c) mock
 
 {-------------------------------------------------------------------------------
   Events
@@ -365,33 +401,41 @@ data Event r = Event {
     before   :: Model  r
   , cmd      :: Cmd :@ r
   , after    :: Model  r
-  , mockResp :: Resp MConn
+  , mockResp :: Resp MWid MConn
   }
 
 deriving instance Show1 r => Show (Event r)
 
-lockstep :: Eq1 r
+lockstep :: forall r. Eq1 r
          => Model   r
          -> Cmd  :@ r
          -> Resp :@ r
          -> Event   r
-lockstep m@(Model _ hs) c (At resp) = Event {
+lockstep m@(Model _ ws cs) c (At resp) = Event {
       before   = m
     , cmd      = c
-    , after    = Model mock' (hs <> hs')
+    , after    = Model mock' (ws <> ws') (cs <> cs')
     , mockResp = resp'
     }
   where
     (resp', mock') = step m c
-    hs' = zip (toList resp) (toList resp')
+    ws' :: WidRefs r
+    ws' = zip (toList1 resp) (toList1 resp')
+    cs' = zip (toList2 resp) (toList2 resp')
+
+toList1 :: Bifoldable t => t a b -> [a]
+toList1 = bifoldMap (:[]) (const [])
+
+toList2 :: Bifoldable t => t a b -> [b]
+toList2 = bifoldMap (const []) (:[])
 
 {-------------------------------------------------------------------------------
   Generator
 -------------------------------------------------------------------------------}
 
 generator :: Model Symbolic -> Maybe (Gen (Cmd :@ Symbolic))
-generator (Model _ conns) = Just $ QC.oneof $ concat [
-      withoutConn
+generator (Model _ wids conns) = Just $ QC.oneof $ concat
+    [ withoutConn
     , if null conns then [] else withConn
     ]
   where
@@ -401,23 +445,38 @@ generator (Model _ conns) = Just $ QC.oneof $ concat [
         ]
 
     withConn :: [Gen (Cmd :@ Symbolic)]
-    withConn = [
-          fmap At $ Close <$> genConn
+    withConn = concat
+        [ withoutWid
+        , if null wids then [] else withWid
+        ]
+
+    withoutWid :: [Gen (Cmd :@ Symbolic)]
+    withoutWid =
+        [ fmap At $ Close <$> genConn
         , fmap At $ CreateWallet <$> genConn <*> genId <*> arbitrary <*> arbitrary
-        , fmap At $ RemoveWallet <$> genConn <*> genId
+        ]
+
+    withWid :: [Gen (Cmd :@ Symbolic)]
+    withWid =
+        [ fmap At $ RemoveWallet <$> genConn <*> genId'
         , fmap At $ ListWallets <$> genConn
-        , fmap At $ PutCheckpoint <$> genConn <*> genId <*> arbitrary
-        , fmap At $ ReadCheckpoint <$> genConn <*> genId
-        , fmap At $ PutWalletMeta <$> genConn <*> genId <*> arbitrary
-        , fmap At $ ReadWalletMeta <$> genConn <*> genId
+        , fmap At $ PutCheckpoint <$> genConn <*> genId' <*> arbitrary
+        , fmap At $ ReadCheckpoint <$> genConn <*> genId'
+        , fmap At $ PutWalletMeta <$> genConn <*> genId' <*> arbitrary
+        , fmap At $ ReadWalletMeta <$> genConn <*> genId'
         -- , fmap At $ PutTxHistory <$> genConn <*> genId <*> genTxHistory
-        , fmap At $ ReadTxHistory <$> genConn <*> genId
+        , fmap At $ ReadTxHistory <$> genConn <*> genId'
         -- , fmap At $ PutPrivateKey <$> genId <*> genPrivKey
         -- , fmap At $ ReadPrivateKey <$> genId
         ]
 
     genId :: Gen MWid
     genId = MWid . WalletId . hash . B8.pack <$> QC.elements ["a", "b", "c"]
+
+    genId' = Val <$> genId
+
+    -- genUsedId :: Gen (Reference MWid Symbolic)
+    -- genUsedId = QC.elements (map fst wids)
 
     genConn :: Gen (Reference DBLayerTest Symbolic)
     genConn = QC.elements (map fst conns)
@@ -437,8 +496,9 @@ transition :: Eq1 r => Model r -> Cmd :@ r -> Resp :@ r -> Model r
 transition m c = after . lockstep m c
 
 precondition :: Model Symbolic -> Cmd :@ Symbolic -> Logic
-precondition (Model _ conns) (At c) =
-    forall (toList c) (`elem` map fst conns)
+precondition (Model _ wids conns) (At c) =
+        forall (toList1 c) (`elem` map fst wids)
+    :&& forall (toList2 c) (`elem` map fst conns)
 
 postcondition :: Model Concrete -> Cmd :@ Concrete -> Resp :@ Concrete -> Logic
 postcondition m c r =
@@ -448,11 +508,11 @@ postcondition m c r =
 
 semantics :: IO DBLayerTest -> Cmd :@ Concrete -> IO (Resp :@ Concrete)
 semantics connect (At c) =
-    (At . fmap QSM.reference) <$>
-      runIO connect (QSM.concrete <$> c)
+    (At . bimap QSM.reference QSM.reference) <$>
+      runIO connect (bimap QSM.concrete QSM.concrete c)
 
 symbolicResp :: Model Symbolic -> Cmd :@ Symbolic -> GenSym (Resp :@ Symbolic)
-symbolicResp m c = At <$> traverse (const QSM.genSym) resp
+symbolicResp m c = At <$> bitraverse (const QSM.genSym) (const QSM.genSym) resp
   where
     (resp, _mock') = step m c
 
@@ -490,20 +550,20 @@ instance CommandNames (At Cmd) where
   cmdName (At ReadPrivateKey{}) = "ReadPrivateKey"
   cmdNames _ = ["Open", "Close", "CreateWallet", "CreateWallet", "RemoveWallet", "ListWallets", "PutCheckpoint", "ReadCheckpoint", "PutWalletMeta", "ReadWalletMeta", "PutTxHistory", "ReadTxHistory", "PutPrivateKey", "ReadPrivateKey"]
 
-instance Functor f => Rank2.Functor (At f) where
-  fmap = \f (At x) -> At $ fmap (lift f) x
+instance Bifunctor f => Rank2.Functor (At f) where
+  fmap = \f (At x) -> At $ bimap (lift f) (lift f) x
     where
       lift :: (r x -> r' x) -> QSM.Reference x r -> QSM.Reference x r'
       lift f (QSM.Reference x) = QSM.Reference (f x)
 
-instance Foldable f => Rank2.Foldable (At f) where
-  foldMap = \f (At x) -> foldMap (lift f) x
+instance Bifoldable f => Rank2.Foldable (At f) where
+  foldMap = \f (At x) -> bifoldMap (lift f) (lift f) x
     where
       lift :: (r x -> m) -> QSM.Reference x r -> m
       lift f (QSM.Reference x) = f x
 
-instance Traversable t => Rank2.Traversable (At t) where
-  traverse = \f (At x) -> At <$> traverse (lift f) x
+instance Bitraversable t => Rank2.Traversable (At t) where
+  traverse = \f (At x) -> At <$> bitraverse (lift f) (lift f) x
     where
       lift :: Functor f
            => (r x -> f (r' x)) -> QSM.Reference x r -> f (QSM.Reference x r')
@@ -558,38 +618,3 @@ prop_sequential dbFile =
 
 dbFileUnused :: IO DBLayerTest
 dbFileUnused = error "db file not used during command generation"
-
-
-{-------------------------------------------------------------------------------
-                      Tests machinery, Arbitrary instances
-                               fixme: copy&pasted
--------------------------------------------------------------------------------}
-
-data DummyTarget
-
-instance TxId DummyTarget where
-    txId = Hash . B8.pack . show
-
-newtype DummyState = DummyState Int
-    deriving (Show, Eq, Generic)
-
-instance Arbitrary DummyState where
-    shrink _ = []
-    arbitrary = DummyState <$> arbitrary
-
-deriving instance NFData DummyState
-
-instance IsOurs DummyState where
-    isOurs _ num = (True, num)
-
-instance Arbitrary (Wallet DummyState DummyTarget) where
-    shrink _ = []
-    arbitrary = initWallet <$> arbitrary
-
-instance Arbitrary WalletMetadata where
-    shrink _ = []
-    arbitrary = WalletMetadata
-        <$> (fmap (WalletName . T.pack) arbitrary)
-        <*> pure Nothing
-        <*> pure Ready
-        <*> pure NotDelegating

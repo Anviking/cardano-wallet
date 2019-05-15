@@ -104,6 +104,7 @@ test-suite unit
     , aeson
     , aeson-qq
     , async
+    , bifunctors
     , bytestring
     , cardano-crypto
     , cardano-wallet-core
@@ -145,6 +146,7 @@ test-suite unit
       Cardano.Wallet.ApiSpec
       Cardano.Wallet.DB.MVarSpec
       Cardano.Wallet.DB.SqliteSpec
+      Cardano.Wallet.DB.TestWallet
       Cardano.Wallet.DBSpec
       Cardano.Wallet.DBSpec2
       Cardano.EnvironmentSpec
