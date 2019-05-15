@@ -31,7 +31,7 @@ import Data.Foldable
     ( toList )
 import Data.Functor.Classes
 import Data.Maybe
-    ( fromJust, fromMaybe )
+    ( fromJust, fromMaybe, mapMaybe )
 import Data.TreeDiff
     ( ToExpr (..), defaultExprViaShow )
 
@@ -341,20 +341,39 @@ runIO connect = fmap Resp . go
     go :: Cmd MWid DBLayerTest -> IO (Either Err (Success MWid DBLayerTest))
     go (Open) = Right . Connection <$> connect
     go (Close _db) = pure (Right (Unit ()))
-    go (CreateWallet db wid wal meta) = bimap errWalletAlreadyExists Unit <$> runExceptT (createWallet (dbLayer db) (widPK wid) wal meta)
-    go (RemoveWallet db wid) = catchNoSuchWallet Unit $ removeWallet (dbLayer db) (widPK' wid)
-    go (ListWallets db) = Right . WalletIds . fmap pkWid <$> listWallets (dbLayer db)
-    go (PutCheckpoint db wid wal) = catchNoSuchWallet Unit $ putCheckpoint (dbLayer db) (widPK' wid) wal
-    go (ReadCheckpoint db wid) = Right . Checkpoint <$> readCheckpoint (dbLayer db) (widPK' wid)
-    go (PutWalletMeta db wid meta) = catchNoSuchWallet Unit $ putWalletMeta (dbLayer db) (widPK' wid) meta
-    go (ReadWalletMeta db wid) = Right . Metadata <$> readWalletMeta (dbLayer db) (widPK' wid)
-    go (PutTxHistory db wid txs) = catchNoSuchWallet Unit $ putTxHistory (dbLayer db) (widPK' wid) txs
-    go (ReadTxHistory db wid) = Right . TxHistory <$> readTxHistory (dbLayer db) (widPK' wid)
+    go (CreateWallet db wid wal meta) =
+        catchWalletAlreadyExists (const (NewWallet wid)) $
+        createWallet (dbLayer db) (widPK wid) wal meta
+    go (RemoveWallet db wid) =
+        catchNoSuchWallet Unit $
+        removeWallet (dbLayer db) (widPK' wid)
+    go (ListWallets db) =
+        Right . WalletIds . fmap pkWid <$>
+        listWallets (dbLayer db)
+    go (PutCheckpoint db wid wal) =
+        catchNoSuchWallet Unit $
+        putCheckpoint (dbLayer db) (widPK' wid) wal
+    go (ReadCheckpoint db wid) =
+        Right . Checkpoint <$>
+        readCheckpoint (dbLayer db) (widPK' wid)
+    go (PutWalletMeta db wid meta) =
+        catchNoSuchWallet Unit $
+        putWalletMeta (dbLayer db) (widPK' wid) meta
+    go (ReadWalletMeta db wid) =
+        Right . Metadata <$>
+        readWalletMeta (dbLayer db) (widPK' wid)
+    go (PutTxHistory db wid txs) =
+        catchNoSuchWallet Unit $
+        putTxHistory (dbLayer db) (widPK' wid) txs
+    go (ReadTxHistory db wid) =
+        Right . TxHistory <$>
+        readTxHistory (dbLayer db) (widPK' wid)
     -- go (PutPrivateKey db wid pk) = catchNoSuchWallet Unit $ putPrivateKey (dbLayer db) (widPK' wid) pk
     -- go (ReadPrivateKey db wid) = Right . PrivateKey <$> readPrivateKey (dbLayer db) (widPK' wid)
     go (PutPrivateKey{}) = error "todo PutPrivateKey"
     go (ReadPrivateKey{}) = error "todo ReadPrivateKey"
 
+    catchWalletAlreadyExists f = fmap (bimap errWalletAlreadyExists f) . runExceptT
     catchNoSuchWallet f = fmap (bimap errNoSuchWallet f) . runExceptT
 
 {-------------------------------------------------------------------------------
@@ -485,7 +504,23 @@ generator (Model _ wids conns) = Just $ QC.oneof $ concat
     -- genTxHistory = arbitrary
 
 shrinker :: Model Symbolic -> Cmd :@ Symbolic -> [Cmd :@ Symbolic]
-shrinker _ _ = [] -- fixme: shrinker
+shrinker (Model _ wids _conns) (At cmd) = case cmd of
+    RemoveWallet c (Val wid) ->
+        [At $ RemoveWallet c (Var r) | r <- mapMaybe (matches wid) wids]
+    PutCheckpoint c (Val wid) wal ->
+        [At $ PutCheckpoint c (Var r) wal | r <- mapMaybe (matches wid) wids]
+    ReadCheckpoint c (Val wid) ->
+        [At $ ReadCheckpoint c (Var r) | r <- mapMaybe (matches wid) wids]
+    PutWalletMeta c (Val wid) meta ->
+        [At $ PutWalletMeta c (Var r) meta | r <- mapMaybe (matches wid) wids]
+    ReadWalletMeta c (Val wid) ->
+        [At $ ReadWalletMeta c (Var r) | r <- mapMaybe (matches wid) wids]
+    _ -> []
+
+  where
+    matches :: MWid -> (r, MWid) -> Maybe r
+    matches w (r, w') | w == w'   = Just r
+                      | otherwise = Nothing
 
 
 {-------------------------------------------------------------------------------
