@@ -31,7 +31,9 @@ library
   build-depends:
       array
     , base
+    , bifunctors
     , bytestring
+    , transformers
   hs-source-dirs:
       src
   exposed-modules:
