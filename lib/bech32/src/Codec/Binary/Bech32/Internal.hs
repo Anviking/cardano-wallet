@@ -149,10 +149,8 @@ data EncodingError = EncodedStringTooLong
 
 decode :: ByteString -> Either DecodingError (HumanReadablePart, ByteString)
 decode bech32 = do
-    guardE (BS.length bech32 <= encodedStringMaxLength)
-        StringToDecodeTooLong
-    guardE (BS.length bech32 >= encodedStringMinLength)
-        StringToDecodeTooShort
+    guardE (BS.length bech32 <= encodedStringMaxLength) StringToDecodeTooLong
+    guardE (BS.length bech32 >= encodedStringMinLength) StringToDecodeTooShort
     guardE (B8.map toUpper bech32 == bech32 || B8.map toLower bech32 == bech32)
         StringToDecodeHasMixedCase
     (hrpUnparsed , dcpUnparsed) <-
@@ -163,10 +161,8 @@ decode bech32 = do
         (\(CharPosition p) -> StringToDecodeContainsInvalidChar $
             CharPosition $ p + BS.length hrpUnparsed + separatorLength)
         (parseDataWithChecksumPart $ B8.unpack dcpUnparsed)
-    guardE (length dcp >= checksumLength)
-        StringToDecodeTooShort
-    guardE (bech32VerifyChecksum hrp dcp)
-        StringToDecodeContainsInvalidChars
+    guardE (length dcp >= checksumLength) StringToDecodeTooShort
+    guardE (bech32VerifyChecksum hrp dcp) StringToDecodeContainsInvalidChars
     dp <- maybeToEither StringToDecodeContainsInvalidChars $
         toBase256 (take (length dcp - checksumLength) dcp)
     return (hrp, BS.pack dp)
