@@ -149,6 +149,12 @@ data EncodingError = EncodedStringTooLong
 
 decode :: ByteString -> Either DecodingError (HumanReadablePart, ByteString)
 decode bech32 = do
+    guardE (BS.length bech32 <= encodedStringMaxLength)
+        StringToDecodeTooLong
+    guardE (BS.length bech32 >= encodedStringMinLength)
+        StringToDecodeTooShort
+    guardE (B8.map toUpper bech32 == bech32 || B8.map toLower bech32 == bech32)
+        StringToDecodeHasMixedCase
     (hrpUnparsed , dcpUnparsed) <-
         maybeToEither StringToDecodeMissingSeparatorChar $
             splitAtLastOccurrence separatorChar $ B8.map toLower bech32
@@ -157,12 +163,6 @@ decode bech32 = do
         (\(CharPosition p) -> StringToDecodeContainsInvalidChar $
             CharPosition $ p + BS.length hrpUnparsed + separatorLength)
         (parseDataWithChecksumPart $ B8.unpack dcpUnparsed)
-    guardE (BS.length bech32 <= encodedStringMaxLength)
-        StringToDecodeTooLong
-    guardE (BS.length bech32 >= encodedStringMinLength)
-        StringToDecodeTooShort
-    guardE (B8.map toUpper bech32 == bech32 || B8.map toLower bech32 == bech32)
-        StringToDecodeHasMixedCase
     guardE (length dcp >= checksumLength)
         StringToDecodeTooShort
     guardE (bech32VerifyChecksum hrp dcp)
