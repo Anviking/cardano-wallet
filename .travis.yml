@@ -119,7 +119,7 @@ jobs:
     - git push -f -q https://WilliamKingNoel-Bot:$GITHUB_ACCESS_TOKEN@github.com/input-output-hk/cardano-wallet gh-pages &>/dev/null
 
   - stage: deploy 🚀
-    if: type = push AND branch = master
+    # if: type = push AND branch = master
     name: "Coveralls"
     script:
     - tar xzf $STACK_WORK_CACHE
