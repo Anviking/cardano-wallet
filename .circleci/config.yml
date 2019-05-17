@@ -14,7 +14,7 @@ jobs:
           command: stack setup -j1
       - run:
           name: Run tests
-          command: stack test -j1
+          command: NETWORK=testnet; stack test -j1
       - save_cache:
           name: Cache Dependencies
           key: cci-demo-haskell-v2-{{ checksum "package.yaml" }}
