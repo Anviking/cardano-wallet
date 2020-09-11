@@ -20,11 +20,7 @@ steps:
       - "./sr/bin/rebuild --build-dir=$BUILD_DIR --cache-dir=$CACHE_DIR"
     timeout_in_minutes: 120
     artifact_paths:
-      - "/build/cardano-wallet/.stack-work/logs/cardano-wallet*.log"
-      - "/build/cardano-wallet/.stack-work/logs/wallet.log"
-      - "/build/cardano-wallet/.stack-work/logs/bft.log"
-      - "/build/cardano-wallet/.stack-work/logs/node.log"
-      - "/build/cardano-wallet/.stack-work/logs/pool*.log"
+      - "/build/cardano-wallet/.stack-work/logs/*.log"
     agents:
       system: x86_64-linux
 
