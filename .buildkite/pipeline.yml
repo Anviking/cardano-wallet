@@ -16,8 +16,10 @@ steps:
   - label: 'Stack Rebuild'
     command:
       - "export TESTS_LOGDIR=$(mktemp -d)"
+      - "echo TESTS_LOGDIR=$TESTS_LOGDIR"
       - "nix-build .buildkite/default.nix -o sr"
       - "./sr/bin/rebuild --build-dir=$BUILD_DIR --cache-dir=$CACHE_DIR"
+      - "ls $TESTS_LOGDIR"
     timeout_in_minutes: 120
     artifact_paths:
       - "/build/cardano-wallet/.stack-work/logs/*.log"
