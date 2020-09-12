@@ -64,6 +64,8 @@ main = do
     (RebuildOpts{..}, cmd) <- parseOpts
     bk <- getBuildkiteEnv
     nightly <- envDefined "NIGHTLY_BUILD"
+    logDir <- envDefined "TESTS_LOGDIR"
+    putStrLn $ "TESTS_LOGDIR is defined: " <> show logDir
     cacheConfig <- getCacheConfig bk optCacheDirectory
     case cmd of
         Build -> do
